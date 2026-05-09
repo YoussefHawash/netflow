@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use netflow_common::L4Proto;
 
@@ -133,10 +133,7 @@ impl ProcCache {
         if let Some(info) = self.proc_info.get(&pid) {
             return info.clone();
         }
-        let name = fs::read_to_string(format!("{PROC}/{pid}/comm"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        let name = process_name(pid).unwrap_or_else(|| format!("pid {pid}"));
 
         let user = match read_real_uid(pid) {
             Some(uid) => self
@@ -162,10 +159,8 @@ impl ProcCache {
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
                 let Ok(tid) = name.parse::<u32>() else { continue };
-                let comm = fs::read_to_string(format!("{PROC}/{pid}/task/{tid}/comm"))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
+                let comm = read_trimmed(format!("{PROC}/{pid}/task/{tid}/comm"))
+                    .unwrap_or_else(|| format!("thread {tid}"));
                 out.push(ThreadInfo { tid, name: comm });
             }
         }
@@ -337,4 +332,61 @@ fn uid_to_username(uid: u32) -> Option<String> {
     }
     let cstr = unsafe { CStr::from_ptr(pwd.pw_name) };
     Some(cstr.to_string_lossy().into_owned())
+}
+
+fn process_name(pid: u32) -> Option<String> {
+    read_trimmed(format!("{PROC}/{pid}/comm"))
+        .or_else(|| status_name(pid))
+        .or_else(|| cmdline_name(pid))
+        .or_else(|| exe_name(pid))
+}
+
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn status_name(pid: u32) -> Option<String> {
+    let status = fs::read_to_string(format!("{PROC}/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("Name:")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn cmdline_name(pid: u32) -> Option<String> {
+    let cmdline = fs::read(format!("{PROC}/{pid}/cmdline")).ok()?;
+    let first_arg = cmdline
+        .split(|byte| *byte == 0)
+        .find(|part| !part.is_empty())?;
+    let first_arg = String::from_utf8_lossy(first_arg);
+    let path = Path::new(first_arg.as_ref());
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| first_arg.trim().to_string());
+    let name = name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn exe_name(pid: u32) -> Option<String> {
+    let path = fs::read_link(format!("{PROC}/{pid}/exe")).ok()?;
+    let name = path.file_name()?.to_string_lossy();
+    let name = name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
