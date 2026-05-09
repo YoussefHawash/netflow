@@ -12,13 +12,15 @@
 //!
 //! `Monitor` is `Send + Sync` and designed to live inside `tauri::State`.
 
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use aya::programs::Xdp;
-use serde::Serialize;
+use chrono::{DateTime, Duration as ChronoDuration, Local, LocalResult, NaiveTime, TimeZone};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -35,7 +37,7 @@ pub use proc_fs::available_interfaces;
 
 // ---------- Public snapshot types -----------------------------------------
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorSnapshot {
     pub available_interfaces: Vec<String>,
@@ -50,7 +52,7 @@ pub struct MonitorSnapshot {
     pub history: Vec<HistoryBucket>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessTraffic {
     pub pid: u32,
@@ -64,14 +66,14 @@ pub struct ProcessTraffic {
     pub threads: Vec<ThreadInfo>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadInfo {
     pub tid: u32,
     pub name: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionTraffic {
     pub remote: String,
@@ -88,11 +90,62 @@ pub struct ConnectionTraffic {
     pub state: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HistoryBucket {
     pub label: String,
     pub received: f64,
     pub sent: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportPeriod {
+    Hour,
+    Day,
+}
+
+impl ExportPeriod {
+    fn start(self, now: DateTime<Local>) -> DateTime<Local> {
+        match self {
+            ExportPeriod::Hour => now - ChronoDuration::hours(1),
+            ExportPeriod::Day => {
+                let midnight = now.date_naive().and_time(NaiveTime::MIN);
+                match Local.from_local_datetime(&midnight) {
+                    LocalResult::Single(start) => start,
+                    LocalResult::Ambiguous(start, _) => start,
+                    LocalResult::None => now - ChronoDuration::hours(24),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct HistoryExport {
+    generated_at: DateTime<Local>,
+    period: ExportPeriod,
+    from: DateTime<Local>,
+    to: DateTime<Local>,
+    snapshot_count: usize,
+    totals: ExportTotals,
+    snapshots: Vec<archiver::ArchiveJob>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ExportTotals {
+    received: f64,
+    sent: f64,
+}
+
+impl ExportTotals {
+    fn from_jobs(jobs: &[archiver::ArchiveJob]) -> Self {
+        Self {
+            received: jobs.iter().map(|job| job.bucket.received).sum(),
+            sent: jobs.iter().map(|job| job.bucket.sent).sum(),
+        }
+    }
 }
 
 // ---------- Monitor configuration -----------------------------------------
@@ -120,6 +173,7 @@ impl Default for MonitorConfig {
 
 pub struct Monitor {
     inner: Arc<Inner>,
+    archive_dir: PathBuf,
     /// Holds the loaded eBPF object; dropping it detaches every program.
     /// Behind a Mutex because `switch_interface` needs `&mut Ebpf`.
     ebpf: Arc<Mutex<aya::Ebpf>>,
@@ -176,6 +230,7 @@ impl Monitor {
 
         Ok(Self {
             inner,
+            archive_dir: config.archive_dir,
             ebpf: Arc::new(Mutex::new(ebpf)),
             xdp_link: Mutex::new(Some(xdp_link)),
             _tasks: tasks,
@@ -185,11 +240,16 @@ impl Monitor {
     /// Build the live snapshot and ship the just-completed epoch to the
     /// archiver. Sync — safe to call from a Tauri command handler.
     pub fn snapshot(&self) -> MonitorSnapshot {
+        let (snapshot, archive_job) = self.capture_snapshot();
+        let _ = self.inner.archive_tx.send(archive_job);
+        snapshot
+    }
+
+    fn capture_snapshot(&self) -> (MonitorSnapshot, archiver::ArchiveJob) {
         let mut state = self.inner.state.lock().unwrap();
         let (snapshot, archive_job) = state.take_snapshot();
         drop(state);
-        let _ = self.inner.archive_tx.send(archive_job);
-        snapshot
+        (snapshot, archive_job)
     }
 
     pub fn interface(&self) -> String {
@@ -263,16 +323,79 @@ impl Monitor {
         self.inner.filter.lock().unwrap().snapshot()
     }
 
-    /// Write a self-contained XML rollup of the most recent snapshot to
-    /// `path`. Useful for the "Save history" button in the UI.
-    pub fn export_history(&self, path: &Path) -> Result<()> {
-        let snap = self.snapshot();
-        let xml = quick_xml::se::to_string_with_root("monitorSnapshot", &snap)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+    /// Write a bounded XML history export for the selected period.
+    pub fn export_history(&self, path: &Path, period: ExportPeriod) -> Result<()> {
+        let requested_at = Local::now();
+        let from = period.start(requested_at);
+        let mut snapshots = self.archive_jobs(from, requested_at);
+
+        let (_, current_job) = self.capture_snapshot();
+        let _ = self.inner.archive_tx.send(current_job.clone());
+        let to = current_job.timestamp;
+        if current_job.timestamp >= from {
+            snapshots.push(current_job);
         }
-        std::fs::write(path, xml)?;
+
+        snapshots.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        let export = HistoryExport {
+            generated_at: to,
+            period,
+            from,
+            to,
+            snapshot_count: snapshots.len(),
+            totals: ExportTotals::from_jobs(&snapshots),
+            snapshots,
+        };
+
+        let xml = quick_xml::se::to_string_with_root("historyExport", &export)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        fs::write(path, xml)?;
         Ok(())
+    }
+
+    fn archive_jobs(
+        &self,
+        from: DateTime<Local>,
+        to: DateTime<Local>,
+    ) -> Vec<archiver::ArchiveJob> {
+        let mut jobs = Vec::new();
+        let mut date = from.date_naive();
+        let end_date = to.date_naive();
+
+        while date <= end_date {
+            let dir = self.archive_dir.join(date.format("%Y-%m-%d").to_string());
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("xml") {
+                        continue;
+                    }
+
+                    let Ok(xml) = fs::read_to_string(&path) else {
+                        continue;
+                    };
+
+                    match quick_xml::de::from_str::<archiver::ArchiveJob>(&xml) {
+                        Ok(job) if job.timestamp >= from && job.timestamp <= to => jobs.push(job),
+                        Ok(_) => {}
+                        Err(error) => log::debug!(
+                            "skipping archived snapshot {}: {error}",
+                            path.display()
+                        ),
+                    }
+                }
+            }
+
+            let Some(next_date) = date.succ_opt() else {
+                break;
+            };
+            date = next_date;
+        }
+
+        jobs
     }
 }
 

@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use netflow::{
-    available_interfaces, FilterMode, FilterState, Monitor, MonitorConfig, MonitorSnapshot,
+    available_interfaces, ExportPeriod, FilterMode, FilterState, Monitor, MonitorConfig,
+    MonitorSnapshot,
 };
 
 // ---------- Tauri commands ------------------------------------------------
@@ -82,12 +83,16 @@ fn clear_ip_filter(monitor: tauri::State<'_, Monitor>) {
     monitor.clear_filter_ipv4();
 }
 
-/// Save the current snapshot as a single XML file. The frontend uses the
-/// dialog plugin to pick the path before invoking this.
+/// Save a bounded XML history file. The frontend uses the dialog plugin to
+/// pick the destination before invoking this.
 #[tauri::command]
-fn export_history(path: String, monitor: tauri::State<'_, Monitor>) -> Result<(), String> {
+fn export_history(
+    path: String,
+    period: Option<ExportPeriod>,
+    monitor: tauri::State<'_, Monitor>,
+) -> Result<(), String> {
     monitor
-        .export_history(Path::new(&path))
+        .export_history(Path::new(&path), period.unwrap_or(ExportPeriod::Hour))
         .map_err(|e| e.to_string())
 }
 

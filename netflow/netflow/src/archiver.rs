@@ -12,12 +12,12 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::mpsc};
 
 use crate::{ConnectionTraffic, HistoryBucket, ProcessTraffic};
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveJob {
     pub timestamp: DateTime<Local>,

@@ -1,5 +1,6 @@
 import { useSaveHistory } from "../lib/saveHistory";
 import { cx } from "../lib/styles";
+import type { ExportPeriod } from "../lib/types";
 
 type Props = { paused: boolean };
 
@@ -14,6 +15,18 @@ export function TitleBar({ paused }: Props) {
         </h1>
       </div>
       <div className="ml-auto flex items-center gap-3.5">
+        <select
+          value={saver.period}
+          disabled={saver.saving}
+          onChange={(event) =>
+            saver.setPeriod(event.target.value as ExportPeriod)
+          }
+          className="min-h-7 rounded-md border border-app-border bg-app-raised px-2 text-[11px] text-app-muted outline-none transition hover:border-app-blue/40 hover:text-app-text focus-visible:border-app-blue"
+          title="XML export range"
+        >
+          <option value="hour">Last hour</option>
+          <option value="day">Today</option>
+        </select>
         <button
           type="button"
           onClick={saver.save}

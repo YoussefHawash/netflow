@@ -1,5 +1,6 @@
 export type Direction = "all" | "inbound" | "outbound";
 export type SortKey = "sent" | "received" | "total";
+export type ExportPeriod = "hour" | "day";
 
 // ---------- Snapshot types (mirror Rust serde camelCase output) -----------
 
