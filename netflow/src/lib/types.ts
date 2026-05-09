@@ -96,7 +96,7 @@ export type FilterState = {
 
 export const DEFAULT_FILTERS: FilterState = {
   timeRange: "live",
-  interfaceName: "enp0s1",
+  interfaceName: "",
   processQuery: "",
   user: "all",
   protocol: "all",

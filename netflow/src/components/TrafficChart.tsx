@@ -65,7 +65,7 @@ export function TrafficChart({ history }: Props) {
   return (
     <canvas
       ref={ref}
-      className="block h-[full] w-full"
+      className="block h-full w-full"
       width={520}
       height={240}
     />

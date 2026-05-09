@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { sortableProcessValue, totalRate } from "./format";
 import type {
   ConnectionTraffic,
@@ -16,29 +16,9 @@ export type TrafficHistory = { received: number[]; sent: number[] };
 export function useMonitor(filters: FilterState) {
   const [snapshot, setSnapshot] = useState<MonitorSnapshot | null>(null);
   const [trafficHistory, setTrafficHistory] = useState<TrafficHistory>(() => ({
-    received: Array.from(
-      { length: MAX_TRAFFIC_POINTS },
-      () => 2 + Math.random() * 11,
-    ),
-    sent: Array.from(
-      { length: MAX_TRAFFIC_POINTS },
-      () => 1 + Math.random() * 8,
-    ),
+    received: Array.from({ length: MAX_TRAFFIC_POINTS }, () => 0),
+    sent: Array.from({ length: MAX_TRAFFIC_POINTS }, () => 0),
   }));
-
-  const tickRef = useRef(0);
-  const pausedAccumulated = useRef(0);
-  const pausedAt = useRef<number | null>(null);
-
-  // Track pause edges so uptime stays accurate.
-  useEffect(() => {
-    if (filters.paused) {
-      pausedAt.current = performance.now();
-    } else if (pausedAt.current !== null) {
-      pausedAccumulated.current += performance.now() - pausedAt.current;
-      pausedAt.current = null;
-    }
-  }, [filters.paused]);
 
   useEffect(() => {
     if (filters.paused) return;
@@ -46,14 +26,9 @@ export function useMonitor(filters: FilterState) {
     let cancelled = false;
 
     const tick = async () => {
-      tickRef.current += 1;
-
       const next = await invoke<MonitorSnapshot>("get_network_snapshot", {
-        interfaceName: filters.interfaceName,
+        interfaceName: filters.interfaceName || null,
       });
-      console.log(
-        `Tick ${tickRef.current}: received ${next.receivedRate} KB/s, sent ${next.sentRate} KB/s`,
-      );
 
       if (cancelled) return;
       setSnapshot(next);
@@ -72,8 +47,6 @@ export function useMonitor(filters: FilterState) {
     filters.paused,
     filters.refreshMs,
     filters.interfaceName,
-    filters.timeRange,
-    filters.historyRange,
   ]);
 
   const filteredProcesses = useMemo(

@@ -12,7 +12,7 @@ type Props = {
 };
 
 export function StatCards({ snapshot, processes, connections }: Props) {
-  const userCount = new Set(processes.map((p) => p.user)).size;
+  const userCount = new Set(processes.map((p) => p.user).filter(Boolean)).size;
   const hostCount = new Set(connections.map((c) => c.remote)).size;
 
   return (

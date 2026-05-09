@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   cx,
   panel,
@@ -17,7 +17,6 @@ import { TrafficChart } from "./TrafficChart";
 
 export function App() {
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
-  const lastEventSample = useRef<number | null>(null);
 
   const updateFilters = useCallback((patch: Partial<FilterState>) => {
     setFilters((prev) => ({ ...prev, ...patch }));
@@ -25,13 +24,6 @@ export function App() {
 
   const { snapshot, trafficHistory, filteredProcesses, filteredConnections } =
     useMonitor(filters);
-
-  useEffect(() => {
-    if (!snapshot || filters.paused) return;
-
-    const sampleId = snapshot.uptimeSeconds;
-    if (sampleId <= 0 || sampleId === lastEventSample.current) return;
-  }, [filters.alertThreshold, filters.paused, snapshot]);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app-bg text-app-text">

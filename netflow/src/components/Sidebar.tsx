@@ -19,6 +19,19 @@ export function Sidebar({
   onChange,
 }: Props) {
   const togglePause = () => onChange({ paused: !filters.paused });
+  const interfaceValue = filters.interfaceName || snapshot?.interfaceName || "";
+  const interfaces = snapshot?.availableInterfaces.length
+    ? snapshot.availableInterfaces
+    : interfaceValue
+      ? [interfaceValue]
+      : [];
+  const users = Array.from(
+    new Set(snapshot?.processes.map((process) => process.user).filter(Boolean)),
+  ).sort();
+  const userOptions =
+    filters.user !== "all" && !users.includes(filters.user)
+      ? [...users, filters.user].sort()
+      : users;
 
   return (
     <aside className="flex w-[214px] shrink-0 flex-col overflow-y-auto border-r border-app-line bg-app-surface">
@@ -33,30 +46,20 @@ export function Sidebar({
         </div>
 
         <ControlBlock>
-          {/* <Row label="Time Range">
-            <SelectField
-              value={filters.timeRange}
-              onChange={(e) => onChange({ timeRange: e.target.value })}
-            >
-              <option value="live">Live (Real-time)</option>
-              <option value="1h">Last 1 Hour</option>
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-            </SelectField>
-          </Row> */}
-
           <Row label="Interface">
             <SelectField
-              value={filters.interfaceName}
-              onChange={(e) => {
-                onChange({ interfaceName: e.target.value });
-              }}
+              value={interfaceValue}
+              onChange={(e) => onChange({ interfaceName: e.target.value })}
             >
-              {snapshot?.availableInterfaces.map((iface) => (
-                <option key={iface} value={iface}>
-                  {iface}
-                </option>
-              )) || <option value="enp0s1">enp0s1</option>}
+              {interfaces.length === 0 ? (
+                <option value="">Detecting...</option>
+              ) : (
+                interfaces.map((iface) => (
+                  <option key={iface} value={iface}>
+                    {iface}
+                  </option>
+                ))
+              )}
             </SelectField>
           </Row>
         </ControlBlock>
@@ -79,10 +82,11 @@ export function Sidebar({
                 onChange={(e) => onChange({ user: e.target.value })}
               >
                 <option value="all">All Users</option>
-                <option value="alice">alice</option>
-                <option value="bob">bob</option>
-                <option value="root">root</option>
-                <option value="system">system</option>
+                {userOptions.map((user) => (
+                  <option key={user} value={user}>
+                    {user}
+                  </option>
+                ))}
               </SelectField>
             </Row>
 
@@ -131,19 +135,6 @@ export function Sidebar({
           </Row>
         </ControlBlock>
 
-        {/* <ControlBlock>
-          {/* <Row label="History">
-            <SelectField
-              value={filters.historyRange}
-              onChange={(e) => onChange({ historyRange: e.target.value })}
-            >
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-            </SelectField>
-          </Row> */}
-        {/* </ControlBlock> */}
-
         <ControlBlock>
           <Row label="Refresh">
             <SelectField
@@ -156,19 +147,6 @@ export function Sidebar({
               <option value={5000}>5 sec</option>
             </SelectField>
           </Row>
-
-          {/* <Row label="Alert KB/s">
-            <input
-              className={control}
-              type="number"
-              min={1}
-              step={1}
-              value={filters.alertThreshold}
-              onChange={(e) =>
-                onChange({ alertThreshold: Number(e.target.value) || 1 })
-              }
-            />
-          </Row> */}
 
           <div className="grid grid-cols-1 gap-1.5">
             <button
