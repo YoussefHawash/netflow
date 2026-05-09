@@ -13,11 +13,9 @@ use aya_ebpf::{
 
 use netflow_common::{PacketEvent, DIR_IN, DIR_OUT, MAX_REMOTE_BYTES};
 
-// ---------- Maps ----------------------------------------------------------
-
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(1 << 20, 0); // 1 MiB
-/// Single byte controlling filter semantics
+static EVENTS: RingBuf = RingBuf::with_byte_size(1 << 20, 0);
+
 #[map]
 static FILTER_MODE: Array<u32> = Array::with_max_entries(1, 0);
 
@@ -26,8 +24,6 @@ static FILTER_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
 #[map]
 static FILTER_IPS_V4: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
-
-// ---------- Constants ----------------------------------------------------
 
 const ETH_HDR_LEN: usize = 14;
 const ETH_P_IPV4: u16 = 0x0800;
@@ -53,13 +49,11 @@ const L4_UDP: u8 = 2;
 const L4_ICMPV4: u8 = 3;
 const L4_ICMPV6: u8 = 4;
 
-// sock_common offsets.
+// sock_common offsets
 const SKC_DADDR_OFF: usize = 0;
 const SKC_DPORT_OFF: usize = 12;
 const SKC_NUM_OFF: usize = 14;
 const SKC_FAMILY_OFF: usize = 16;
-
-// ---------- Packet header structs ----------------------------------------
 
 #[repr(C, packed)]
 struct EthHdr {
@@ -111,8 +105,6 @@ struct UdpHdr {
     len: u16,
     check: u16,
 }
-
-// ---------- Helpers ------------------------------------------------------
 
 #[inline(always)]
 fn xdp_ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
@@ -181,11 +173,10 @@ fn pid_listed(pid: u32) -> bool {
 #[inline(always)]
 fn should_block(matched: bool) -> bool {
     match filter_mode() {
-        1 => !matched, // allowlist: block when NOT matched
-        _ => matched,  // denylist: block when matched
+        1 => !matched,
+        _ => matched,
     }
 }
-// ---------- TC egress -----------------------------------------------------
 
 #[classifier]
 pub fn netflow_egress(ctx: TcContext) -> i32 {
@@ -203,7 +194,6 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_OK);
     }
 
-    // TC is the real egress packet verdict. Keep it scoped to IPv4 address
     let ip = tc_ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
     let daddr = unsafe { (*ip).daddr };
 
@@ -213,7 +203,6 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
 
     Ok(TC_ACT_OK)
 }
-// ---------- XDP --------------------------------------------------
 
 #[xdp]
 pub fn netflow(ctx: XdpContext) -> u32 {
@@ -253,7 +242,6 @@ fn parse_v4(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<Verdict, ()> {
     let ip = ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
     let saddr = unsafe { (*ip).saddr };
 
-    // Filter check
     if should_block(ipv4_listed(saddr)) {
         return Ok(Verdict::Drop);
     }
@@ -338,8 +326,6 @@ fn parse_l4(
     Ok(())
 }
 
-// ---------- Egress kprobes ----------------------------------------------
-
 #[kprobe]
 pub fn tcp_sendmsg(ctx: ProbeContext) -> u32 {
     let _ = try_egress(ctx, L4_TCP);
@@ -407,8 +393,6 @@ fn try_egress(ctx: ProbeContext, l4: u8) -> Result<(), i64> {
     submit(event);
     Ok(())
 }
-
-// ---------- Panic  ---------------------------------------------
 
 #[cfg(not(test))]
 #[panic_handler]

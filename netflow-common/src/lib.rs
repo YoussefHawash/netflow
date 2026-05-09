@@ -1,7 +1,5 @@
 #![no_std]
 
-// This file defines common data structures and constants for NetFlow
-
 pub const MAX_REMOTE_BYTES: usize = 16;
 
 #[repr(u8)]

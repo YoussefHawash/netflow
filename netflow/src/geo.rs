@@ -1,5 +1,3 @@
-//! Background GeoIP lookup for remote IPs.
-
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
@@ -8,7 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-const RATE_LIMIT_MS: u64 = 1500; // ~40 req/min, under ip-api's free quota
+const RATE_LIMIT_MS: u64 = 1500;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
@@ -34,8 +32,6 @@ impl GeoCache {
         cache
     }
 
-    /// Returns the country code for `ip`, or an empty string if not yet
-    /// resolved. The first call for an IP enqueues a background lookup.
     pub fn lookup(&self, ip: IpAddr) -> String {
         let mut data = self.data.lock().unwrap();
         match data.get(&ip) {
@@ -46,7 +42,6 @@ impl GeoCache {
         data.insert(ip, Entry::Pending);
         drop(data);
 
-        // Skip private ranges entirely so we don't waste API quota.
         if !is_public(&ip) {
             self.data
                 .lock()
@@ -72,7 +67,7 @@ async fn worker(mut rx: UnboundedReceiver<IpAddr>, cache: Arc<GeoCache>) {
     let mut last_call = tokio::time::Instant::now() - Duration::from_secs(60);
 
     while let Some(ip) = rx.recv().await {
-        // Rate limit between API calls.
+        // rate limit
         let elapsed = last_call.elapsed();
         if elapsed < Duration::from_millis(RATE_LIMIT_MS) {
             tokio::time::sleep(Duration::from_millis(RATE_LIMIT_MS) - elapsed).await;
@@ -111,7 +106,6 @@ fn is_public_v4(ip: &Ipv4Addr) -> bool {
         return false;
     }
     let oct = ip.octets();
-    // 100.64.0.0/10 (CGNAT) and 198.18.0.0/15 (benchmarking)
     if oct[0] == 100 && (oct[1] & 0xc0) == 64 {
         return false;
     }
@@ -126,7 +120,6 @@ fn is_public_v6(ip: &Ipv6Addr) -> bool {
         return false;
     }
     let seg = ip.segments();
-    // fc00::/7 unique-local, fe80::/10 link-local
     if (seg[0] & 0xfe00) == 0xfc00 || (seg[0] & 0xffc0) == 0xfe80 {
         return false;
     }

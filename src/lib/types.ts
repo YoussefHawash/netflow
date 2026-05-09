@@ -2,8 +2,6 @@ export type Direction = "all" | "inbound" | "outbound";
 export type SortKey = "sent" | "received" | "total";
 export type ExportPeriod = "hour" | "day";
 
-// ---------- Snapshot types (mirror Rust serde camelCase output) -----------
-
 export type ThreadInfo = {
   tid: number;
   name: string;
@@ -14,7 +12,6 @@ export type ProcessTraffic = {
   name: string;
   user: string;
   flag: string;
-  // Free-form because the backend can return "TCP" / "UDP" / "MIXED" / etc.
   protocol: string;
   received: number;
   sent: number;
@@ -67,8 +64,6 @@ export type MonitorSnapshot = {
   history: HistoryBucket[];
 };
 
-// ---------- eBPF firewall (deny/allow list) ------------------------------
-
 export type FirewallMode = "denylist" | "allowlist";
 
 export type FirewallState = {
@@ -76,8 +71,6 @@ export type FirewallState = {
   pids: number[];
   ipv4: string[];
 };
-
-// ---------- Frontend UI filter form (sidebar controls) -------------------
 
 export type FilterState = {
   timeRange: string;

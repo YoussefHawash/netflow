@@ -1,20 +1,16 @@
-//! Live aggregator: ingests `PacketEvent`s and turns them into
-//! `MonitorSnapshot`s on demand.
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate};
-use netflow_common::{L4Proto, PacketEvent, DIR_OUT, DIR_IN};
+use netflow_common::{L4Proto, PacketEvent, DIR_IN, DIR_OUT};
 
 use crate::archiver::ArchiveJob;
 use crate::geo::GeoCache;
 use crate::proc_fs::{self, ProcCache};
 use crate::{ConnectionTraffic, HistoryBucket, MonitorSnapshot, ProcessTraffic};
 
-/// Connection key — full 5-tuple. Matches what we emit from eBPF.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct ConnKey {
     pub local_port: u16,
@@ -116,8 +112,6 @@ impl State {
     }
 
     pub fn ingest(&mut self, ev: &PacketEvent) {
-        // Ingress events that aren't on the active interface are noise.
-        // Egress comes from kprobes (no ifindex) and always passes through.
         if ev.direction == DIR_IN {
             if let Some(want) = self.iface_index {
                 if ev.ifindex != want {
@@ -153,7 +147,6 @@ impl State {
         let now = Instant::now();
         let elapsed = (now - self.last_snapshot_at).as_secs_f64().max(0.001);
 
-        // Roll daily totals at local midnight.
         let today = Local::now().date_naive();
         if today != self.today_date {
             self.today_date = today;
@@ -168,7 +161,6 @@ impl State {
 
         self.proc_cache.refresh();
 
-        // Backfill PIDs on connections seen by XDP only.
         for (key, agg) in self.conns.iter_mut() {
             if agg.last_pid == 0 {
                 if let Some(pid) = self.proc_cache.pid_for_socket(
@@ -183,7 +175,6 @@ impl State {
             }
         }
 
-        // Per-PID rollup table feeds ProcessTraffic.
         let mut per_proc: HashMap<u32, ProcRollup> = HashMap::new();
         let mut connections = Vec::with_capacity(self.conns.len());
 
@@ -227,7 +218,9 @@ impl State {
             });
 
             if pid != 0 {
-                let entry = per_proc.entry(pid).or_insert_with(|| ProcRollup::new(&proto_str));
+                let entry = per_proc
+                    .entry(pid)
+                    .or_insert_with(|| ProcRollup::new(&proto_str));
                 entry.received += agg.received;
                 entry.sent += agg.sent;
                 entry.add_proto(&proto_str);
@@ -235,7 +228,6 @@ impl State {
             }
         }
 
-        // Build the processes list and refresh per-process history rings.
         let active_pids: HashSet<u32> = per_proc.keys().copied().collect();
         self.proc_history.retain(|pid, _| active_pids.contains(pid));
 
@@ -272,8 +264,6 @@ impl State {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Push the just-completed bucket into history; archiver gets a copy
-        // so nothing is lost when it's eventually evicted from the ring.
         let label = Local::now().format("%H:%M:%S").to_string();
         let bucket = HistoryBucket {
             label,
@@ -308,7 +298,6 @@ impl State {
             processes,
         };
 
-        // Reset epoch counters and prune long-idle connections.
         self.epoch_in = 0;
         self.epoch_out = 0;
         self.last_snapshot_at = now;
@@ -318,9 +307,6 @@ impl State {
         (snapshot, archive_job)
     }
 }
-
-/// Per-PID accumulator used while building the snapshot. Kept private so
-/// the public ProcessTraffic stays a plain serializable struct.
 struct ProcRollup {
     received: u64,
     sent: u64,

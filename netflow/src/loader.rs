@@ -1,8 +1,3 @@
-//! Loads the embedded eBPF object, attaches XDP + TC to the requested
-//! interface and the egress kprobes to `tcp_sendmsg` / `udp_sendmsg`,
-//! and pulls out the maps userspace needs to talk back to the kernel
-//! (the events ring buffer + the three filter maps).
-
 use anyhow::{Context, Result};
 use aya::{
     maps::{Array, HashMap, MapData, RingBuf},
@@ -31,7 +26,7 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
     )))
     .context("loading embedded eBPF object")?;
 
-    // XDP ingress.
+    // xdp
     let xdp: &mut Xdp = ebpf
         .program_mut("netflow")
         .context("xdp program 'netflow' missing from object")?
@@ -39,7 +34,7 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
     xdp.load().context("loading xdp program")?;
     let xdp_link = attach_xdp(xdp, interface)?;
 
-    // TC egress firewall.
+    // tc egress
     let tc_egress: &mut SchedClassifier = ebpf
         .program_mut("netflow_egress")
         .context("tc program 'netflow_egress' missing from object")?
@@ -47,7 +42,7 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
     tc_egress.load().context("loading tc egress program")?;
     let tc_egress_link = attach_tc_egress(tc_egress, interface)?;
 
-    // Egress kprobes.
+    // kprobes
     for sym in ["tcp_sendmsg", "udp_sendmsg"] {
         let kp: &mut KProbe = ebpf
             .program_mut(sym)

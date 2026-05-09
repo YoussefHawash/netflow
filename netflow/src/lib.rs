@@ -1,17 +1,3 @@
-//! netflow — eBPF-backed live network monitor.
-//!
-//! Architecture:
-//!   * eBPF (XDP + TC + kprobes on tcp/udp_sendmsg) writes one PacketEvent
-//!     per packet/send into a 1 MiB ring buffer.
-//!   * A background tokio task drains the ring buffer into a per-connection
-//!     aggregator behind a Mutex.
-//!   * Calling `Monitor::snapshot()` builds the live `MonitorSnapshot` and
-//!     ships the just-completed epoch as XML to the archiver task.
-//!   * eBPF-side filter maps (`set_filter_mode`, `add_filter_pid`,
-//!     `add_filter_ipv4`) drop or hide traffic in-kernel.
-//!
-//! `Monitor` is `Send + Sync` and designed to live inside `tauri::State`.
-
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -34,8 +20,6 @@ mod state;
 
 pub use filter::{FilterMode, FilterState};
 pub use proc_fs::available_interfaces;
-
-// ---------- Public snapshot types -----------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -148,8 +132,6 @@ impl ExportTotals {
     }
 }
 
-// ---------- Monitor configuration -----------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     pub interface: String,
@@ -169,13 +151,9 @@ impl Default for MonitorConfig {
     }
 }
 
-// ---------- Monitor -------------------------------------------------------
-
 pub struct Monitor {
     inner: Arc<Inner>,
     archive_dir: PathBuf,
-    /// Holds the loaded eBPF object; dropping it detaches every program.
-    /// Behind a Mutex because `switch_interface` needs `&mut Ebpf`.
     ebpf: Arc<Mutex<aya::Ebpf>>,
     xdp_link: Mutex<Option<aya::programs::xdp::XdpLinkId>>,
     tc_egress_link: Mutex<Option<aya::programs::tc::SchedClassifierLinkId>>,
@@ -237,8 +215,6 @@ impl Monitor {
         })
     }
 
-    /// Build the live snapshot and ship the just-completed epoch to the
-    /// archiver. Sync — safe to call from a Tauri command handler.
     pub fn snapshot(&self) -> MonitorSnapshot {
         let (snapshot, archive_job) = self.capture_snapshot();
         let _ = self.inner.archive_tx.send(archive_job);
@@ -256,7 +232,6 @@ impl Monitor {
         self.inner.state.lock().unwrap().interface().to_string()
     }
 
-    /// Detach XDP/TC from the current interface and re-attach to `iface`.
     pub fn switch_interface(&self, iface: &str) -> Result<()> {
         if iface.is_empty() || iface == self.interface() {
             return Ok(());
@@ -321,8 +296,6 @@ impl Monitor {
         Ok(())
     }
 
-    // ---- Filter API ------------------------------------------------------
-
     pub fn set_filter_mode(&self, mode: FilterMode) -> Result<()> {
         self.inner.filter.lock().unwrap().set_mode(mode)
     }
@@ -355,7 +328,6 @@ impl Monitor {
         self.inner.filter.lock().unwrap().snapshot()
     }
 
-    /// Write a bounded XML history export for the selected period.
     pub fn export_history(&self, path: &Path, period: ExportPeriod) -> Result<()> {
         let requested_at = Local::now();
         let from = period.start(requested_at);

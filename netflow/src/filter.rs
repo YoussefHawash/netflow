@@ -10,9 +10,7 @@ pub const MODE_ALLOWLIST: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterMode {
-    /// Listed PIDs / IPs are blocked, everything else passes.
     Denylist,
-    /// Only listed PIDs / IPs pass, everything else is blocked.
     Allowlist,
 }
 
@@ -133,9 +131,6 @@ impl FilterMaps {
         }
     }
 
-    /// Convert an IPv4 to the host-order u32 stored in the map. The eBPF
-    /// side does the equivalent via `u32::from_be(saddr_be)` so both ends
-    /// see the same key.
     fn key(addr: Ipv4Addr) -> u32 {
         u32::from_be_bytes(addr.octets())
     }

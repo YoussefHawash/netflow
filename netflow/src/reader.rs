@@ -1,6 +1,3 @@
-//! Background task: drain the eBPF ring buffer and feed each PacketEvent
-//! into the aggregator.
-
 use std::sync::Arc;
 
 use aya::maps::{MapData, RingBuf};
@@ -33,8 +30,6 @@ pub async fn run(ring_buf: RingBuf<MapData>, inner: Arc<Inner>) {
             if bytes.len() < std::mem::size_of::<PacketEvent>() {
                 continue;
             }
-            // SAFETY: PacketEvent is repr(C) POD; the kernel writes exactly
-            // sizeof(PacketEvent) bytes per record.
             let event: PacketEvent = unsafe {
                 std::ptr::read_unaligned(bytes.as_ptr() as *const PacketEvent)
             };

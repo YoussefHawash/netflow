@@ -12,8 +12,6 @@ use netflow::{
     MonitorSnapshot,
 };
 
-// ---------- Tauri commands ------------------------------------------------
-
 #[tauri::command]
 fn get_network_snapshot(
     interface_name: Option<String>,
@@ -77,7 +75,6 @@ fn clear_ip_filter(monitor: tauri::State<'_, Monitor>) {
     monitor.clear_filter_ipv4();
 }
 
-/// Save a bounded XML history file. The frontend uses the dialog plugin to
 #[tauri::command]
 fn export_history(
     path: String,
@@ -157,9 +154,7 @@ fn main() {
         iface,
         archive.display()
     );
-    // Important Note
-    // Keep the tokio runtime alive for the lifetime of the Tauri app so
-    // the ringbuf reader / archiver / geo worker tasks keep ticking.
+    // keep runtime alive
     let _runtime_guard = runtime;
 
     tauri::Builder::default()
