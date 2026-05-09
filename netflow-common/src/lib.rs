@@ -1,8 +1,6 @@
 #![no_std]
 
-// Wire format shared between the eBPF programs and the userspace loader.
-// Everything in this file MUST stay #[repr(C)] and POD so it can be sent
-// through a ring buffer without serialization.
+// This file defines common data structures and constants for NetFlow
 
 pub const MAX_REMOTE_BYTES: usize = 16;
 
@@ -53,11 +51,6 @@ impl L4Proto {
 pub const DIR_IN: u8 = 0;
 pub const DIR_OUT: u8 = 1;
 
-/// One observed packet (or syscall send) reported from the kernel.
-///
-/// Ingress events come from the XDP program and have `pid == 0` (XDP runs
-/// before any socket lookup). Egress events come from the kprobes on
-/// `tcp_sendmsg` / `udp_sendmsg` and carry the calling task's PID/TGID.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PacketEvent {

@@ -1,4 +1,4 @@
-//! Loads the embedded eBPF object, attaches XDP to the requested
+//! Loads the embedded eBPF object, attaches XDP + TC to the requested
 //! interface and the egress kprobes to `tcp_sendmsg` / `udp_sendmsg`,
 //! and pulls out the maps userspace needs to talk back to the kernel
 //! (the events ring buffer + the three filter maps).
@@ -6,7 +6,11 @@
 use anyhow::{Context, Result};
 use aya::{
     maps::{Array, HashMap, MapData, RingBuf},
-    programs::{xdp::XdpLinkId, KProbe, Xdp, XdpFlags},
+    programs::{
+        tc::{self, SchedClassifierLinkId},
+        xdp::XdpLinkId,
+        KProbe, SchedClassifier, TcAttachType, TcError, Xdp, XdpFlags,
+    },
     Ebpf,
 };
 
@@ -16,6 +20,7 @@ pub struct LoadedPrograms {
     pub ebpf: Ebpf,
     pub events: RingBuf<MapData>,
     pub xdp_link: XdpLinkId,
+    pub tc_egress_link: SchedClassifierLinkId,
     pub filter: FilterMaps,
 }
 
@@ -33,6 +38,14 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
         .try_into()?;
     xdp.load().context("loading xdp program")?;
     let xdp_link = attach_xdp(xdp, interface)?;
+
+    // TC egress firewall.
+    let tc_egress: &mut SchedClassifier = ebpf
+        .program_mut("netflow_egress")
+        .context("tc program 'netflow_egress' missing from object")?
+        .try_into()?;
+    tc_egress.load().context("loading tc egress program")?;
+    let tc_egress_link = attach_tc_egress(tc_egress, interface)?;
 
     // Egress kprobes.
     for sym in ["tcp_sendmsg", "udp_sendmsg"] {
@@ -69,14 +82,30 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
         ebpf,
         events,
         xdp_link,
+        tc_egress_link,
         filter,
     })
 }
 
-/// Attach XDP to `interface`, falling back to SKB mode if the driver
-/// doesn't support native mode.
 pub fn attach_xdp(xdp: &mut Xdp, interface: &str) -> Result<XdpLinkId> {
     xdp.attach(interface, XdpFlags::default())
         .or_else(|_| xdp.attach(interface, XdpFlags::SKB_MODE))
         .with_context(|| format!("attaching XDP to {interface}"))
+}
+
+pub fn attach_tc_egress(
+    classifier: &mut SchedClassifier,
+    interface: &str,
+) -> Result<SchedClassifierLinkId> {
+    ensure_clsact(interface)?;
+    classifier
+        .attach(interface, TcAttachType::Egress)
+        .with_context(|| format!("attaching TC egress to {interface}"))
+}
+
+fn ensure_clsact(interface: &str) -> Result<()> {
+    match tc::qdisc_add_clsact(interface) {
+        Ok(()) | Err(TcError::AlreadyAttached) => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("adding clsact qdisc to {interface}")),
+    }
 }

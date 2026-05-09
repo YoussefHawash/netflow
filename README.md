@@ -32,15 +32,6 @@ CC=${ARCH}-linux-musl-gcc cargo build --package netflow --release \
 The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/netflow` can be
 copied to a Linux server or VM and run there.
 
-## License
-
-With the exception of eBPF code, netflow is distributed under the terms
-of either the [MIT license] or the [Apache License] (version 2.0), at your
-option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
-be dual licensed as above, without any additional terms or conditions.
 
 ### eBPF
 

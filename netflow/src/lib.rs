@@ -1,8 +1,8 @@
 //! netflow — eBPF-backed live network monitor.
 //!
 //! Architecture:
-//!   * eBPF (XDP + kprobes on tcp/udp_sendmsg) writes one PacketEvent per
-//!     packet/send into a 1 MiB ring buffer.
+//!   * eBPF (XDP + TC + kprobes on tcp/udp_sendmsg) writes one PacketEvent
+//!     per packet/send into a 1 MiB ring buffer.
 //!   * A background tokio task drains the ring buffer into a per-connection
 //!     aggregator behind a Mutex.
 //!   * Calling `Monitor::snapshot()` builds the live `MonitorSnapshot` and
@@ -17,8 +17,8 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
-use aya::programs::Xdp;
+use anyhow::{Result, anyhow};
+use aya::programs::{SchedClassifier, Xdp};
 use chrono::{DateTime, Duration as ChronoDuration, Local, LocalResult, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -178,6 +178,7 @@ pub struct Monitor {
     /// Behind a Mutex because `switch_interface` needs `&mut Ebpf`.
     ebpf: Arc<Mutex<aya::Ebpf>>,
     xdp_link: Mutex<Option<aya::programs::xdp::XdpLinkId>>,
+    tc_egress_link: Mutex<Option<aya::programs::tc::SchedClassifierLinkId>>,
     _tasks: Vec<JoinHandle<()>>,
 }
 
@@ -195,16 +196,14 @@ impl Monitor {
             ebpf,
             events,
             xdp_link,
+            tc_egress_link,
             filter,
         } = loader::load(&config.interface)?;
 
         let (archive_tx, archive_rx) = mpsc::unbounded_channel();
 
         if let Err(e) = std::fs::create_dir_all(&config.archive_dir) {
-            log::warn!(
-                "could not create archive dir {:?}: {e}",
-                config.archive_dir
-            );
+            log::warn!("could not create archive dir {:?}: {e}", config.archive_dir);
         }
 
         let iface_index = proc_fs::ifindex_of(&config.interface);
@@ -233,6 +232,7 @@ impl Monitor {
             archive_dir: config.archive_dir,
             ebpf: Arc::new(Mutex::new(ebpf)),
             xdp_link: Mutex::new(Some(xdp_link)),
+            tc_egress_link: Mutex::new(Some(tc_egress_link)),
             _tasks: tasks,
         })
     }
@@ -256,7 +256,7 @@ impl Monitor {
         self.inner.state.lock().unwrap().interface().to_string()
     }
 
-    /// Detach XDP from the current interface and re-attach to `iface`.
+    /// Detach XDP/TC from the current interface and re-attach to `iface`.
     pub fn switch_interface(&self, iface: &str) -> Result<()> {
         if iface.is_empty() || iface == self.interface() {
             return Ok(());
@@ -265,18 +265,50 @@ impl Monitor {
             .ok_or_else(|| anyhow!("interface '{iface}' does not exist"))?;
 
         let mut ebpf = self.ebpf.lock().unwrap();
-        let xdp: &mut Xdp = ebpf
-            .program_mut("netflow")
-            .ok_or_else(|| anyhow!("xdp program missing"))?
-            .try_into()?;
+        let new_xdp_link = {
+            let xdp: &mut Xdp = ebpf
+                .program_mut("netflow")
+                .ok_or_else(|| anyhow!("xdp program missing"))?
+                .try_into()?;
+            loader::attach_xdp(xdp, iface)?
+        };
+        let new_tc_link = {
+            let tc_egress: &mut SchedClassifier = ebpf
+                .program_mut("netflow_egress")
+                .ok_or_else(|| anyhow!("tc egress program missing"))?
+                .try_into()?;
+            match loader::attach_tc_egress(tc_egress, iface) {
+                Ok(link) => link,
+                Err(error) => {
+                    let xdp: &mut Xdp = ebpf
+                        .program_mut("netflow")
+                        .ok_or_else(|| anyhow!("xdp program missing"))?
+                        .try_into()?;
+                    let _ = xdp.detach(new_xdp_link);
+                    return Err(error);
+                }
+            }
+        };
 
         let mut link_slot = self.xdp_link.lock().unwrap();
-        if let Some(prev) = link_slot.take() {
+        if let Some(prev) = link_slot.replace(new_xdp_link) {
+            let xdp: &mut Xdp = ebpf
+                .program_mut("netflow")
+                .ok_or_else(|| anyhow!("xdp program missing"))?
+                .try_into()?;
             let _ = xdp.detach(prev);
         }
-        let new_link = loader::attach_xdp(xdp, iface)?;
-        *link_slot = Some(new_link);
         drop(link_slot);
+
+        let mut tc_link_slot = self.tc_egress_link.lock().unwrap();
+        if let Some(prev) = tc_link_slot.replace(new_tc_link) {
+            let tc_egress: &mut SchedClassifier = ebpf
+                .program_mut("netflow_egress")
+                .ok_or_else(|| anyhow!("tc egress program missing"))?
+                .try_into()?;
+            let _ = tc_egress.detach(prev);
+        }
+        drop(tc_link_slot);
         drop(ebpf);
 
         self.inner
@@ -381,10 +413,9 @@ impl Monitor {
                     match quick_xml::de::from_str::<archiver::ArchiveJob>(&xml) {
                         Ok(job) if job.timestamp >= from && job.timestamp <= to => jobs.push(job),
                         Ok(_) => {}
-                        Err(error) => log::debug!(
-                            "skipping archived snapshot {}: {error}",
-                            path.display()
-                        ),
+                        Err(error) => {
+                            log::debug!("skipping archived snapshot {}: {error}", path.display())
+                        }
                     }
                 }
             }

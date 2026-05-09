@@ -1,13 +1,3 @@
-//! Per-snapshot XML archiver.
-//!
-//! Each `Monitor::snapshot()` call ships the just-completed epoch into this
-//! task as an `ArchiveJob`. The archiver writes one XML file per job under:
-//!
-//!     <archive_dir>/YYYY-MM-DD/HHMMSS_<millis>.xml
-//!
-//! That keeps every observation that ever flowed through the live snapshot
-//! persisted on disk, even if the user never polled fast enough to "see"
-//! everything.
 
 use std::path::{Path, PathBuf};
 

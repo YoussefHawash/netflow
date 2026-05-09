@@ -1,10 +1,4 @@
 //! Background GeoIP lookup for remote IPs.
-//!
-//! Uses the public ip-api.com service: ~45 req/min limit, no API key. We
-//! cache every resolved address for the lifetime of the process; failures
-//! are also cached so we don't hammer the API for unreachable hosts.
-//! Private/loopback ranges are short-circuited to "LAN" without a network
-//! call.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

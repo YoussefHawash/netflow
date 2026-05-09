@@ -1,7 +1,3 @@
-//! Wrappers around the eBPF filter maps (FILTER_MODE, FILTER_PIDS,
-//! FILTER_IPS_V4). Each method takes `&mut self` and is meant to be called
-//! through the `Mutex<FilterMaps>` held by the Monitor.
-
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result};
@@ -129,7 +125,11 @@ impl FilterMaps {
         FilterState {
             mode: self.mode(),
             pids: self.list_pids(),
-            ipv4: self.list_ipv4().into_iter().map(|i| i.to_string()).collect(),
+            ipv4: self
+                .list_ipv4()
+                .into_iter()
+                .map(|i| i.to_string())
+                .collect(),
         }
     }
 

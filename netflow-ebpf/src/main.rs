@@ -4,11 +4,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 use aya_ebpf::{
-    bindings::xdp_action,
+    bindings::{xdp_action, TC_ACT_OK, TC_ACT_SHOT},
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel},
-    macros::{kprobe, map, xdp},
+    macros::{classifier, kprobe, map, xdp},
     maps::{Array, HashMap, RingBuf},
-    programs::{ProbeContext, XdpContext},
+    programs::{ProbeContext, TcContext, XdpContext},
 };
 
 use netflow_common::{PacketEvent, DIR_IN, DIR_OUT, MAX_REMOTE_BYTES};
@@ -17,28 +17,20 @@ use netflow_common::{PacketEvent, DIR_IN, DIR_OUT, MAX_REMOTE_BYTES};
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(1 << 20, 0); // 1 MiB
-
-/// Single byte controlling filter semantics:
-///   0 = denylist  — listed PIDs / IPs are dropped, everything else passes
-///   1 = allowlist — only listed PIDs / IPs pass, everything else dropped
+/// Single byte controlling filter semantics
 #[map]
 static FILTER_MODE: Array<u32> = Array::with_max_entries(1, 0);
 
-/// PIDs participating in the filter list. Value byte is unused; presence
-/// in the map is what matters. Only checked on egress (XDP doesn't have
-/// PID context).
 #[map]
 static FILTER_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
-/// IPv4 addresses in host byte order (e.g. 1.2.3.4 → 0x01020304).
-/// Checked on both ingress (source IP) and egress (destination IP).
 #[map]
 static FILTER_IPS_V4: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
 
 // ---------- Constants ----------------------------------------------------
 
 const ETH_HDR_LEN: usize = 14;
-const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV4: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_ARP: u16 = 0x0806;
 
@@ -61,8 +53,7 @@ const L4_UDP: u8 = 2;
 const L4_ICMPV4: u8 = 3;
 const L4_ICMPV6: u8 = 4;
 
-// sock_common offsets (kernel 5.x/6.x). Stable across configs because
-// sock_common is the head of struct sock.
+// sock_common offsets.
 const SKC_DADDR_OFF: usize = 0;
 const SKC_DPORT_OFF: usize = 12;
 const SKC_NUM_OFF: usize = 14;
@@ -124,7 +115,18 @@ struct UdpHdr {
 // ---------- Helpers ------------------------------------------------------
 
 #[inline(always)]
-fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
+fn xdp_ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let len = core::mem::size_of::<T>();
+    if start + offset + len > end {
+        return None;
+    }
+    Some((start + offset) as *const T)
+}
+
+#[inline(always)]
+fn tc_ptr_at<T>(ctx: &TcContext, offset: usize) -> Option<*const T> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = core::mem::size_of::<T>();
@@ -165,9 +167,6 @@ fn filter_mode() -> u32 {
     FILTER_MODE.get(0).copied().unwrap_or(0)
 }
 
-/// `addr_be` is the address as stored in IP headers (network byte order
-/// when interpreted as bytes). Convert to host order so the userspace key
-/// (`u32::from_be_bytes(octets)`) matches.
 #[inline(always)]
 fn ipv4_listed(addr_be: u32) -> bool {
     let host = u32::from_be(addr_be);
@@ -179,8 +178,6 @@ fn pid_listed(pid: u32) -> bool {
     unsafe { FILTER_PIDS.get(&pid).is_some() }
 }
 
-/// Convert "is the packet matched by the filter list?" into "should we
-/// drop it?", taking the current filter mode into account.
 #[inline(always)]
 fn should_block(matched: bool) -> bool {
     match filter_mode() {
@@ -188,8 +185,35 @@ fn should_block(matched: bool) -> bool {
         _ => matched,  // denylist: block when matched
     }
 }
+// ---------- TC egress -----------------------------------------------------
 
-// ---------- XDP ingress --------------------------------------------------
+#[classifier]
+pub fn netflow_egress(ctx: TcContext) -> i32 {
+    match try_tc_egress(&ctx) {
+        Ok(action) => action,
+        Err(_) => TC_ACT_OK,
+    }
+}
+
+fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
+    let eth = tc_ptr_at::<EthHdr>(ctx, 0).ok_or(())?;
+    let proto = u16::from_be(unsafe { (*eth).h_proto });
+
+    if proto != ETH_P_IP {
+        return Ok(TC_ACT_OK);
+    }
+
+    // TC is the real egress packet verdict. Keep it scoped to IPv4 address
+    let ip = tc_ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
+    let daddr = unsafe { (*ip).daddr };
+
+    if should_block(ipv4_listed(daddr)) {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    Ok(TC_ACT_OK)
+}
+// ---------- XDP --------------------------------------------------
 
 #[xdp]
 pub fn netflow(ctx: XdpContext) -> u32 {
@@ -207,22 +231,15 @@ fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
     let mut event = empty_event();
     event.direction = DIR_IN;
     event.ifindex = ifindex;
-
     match proto {
-        ETH_P_IP => match parse_v4(ctx, &mut event)? {
+        ETH_P_IPV4 => match parse_v4(ctx, &mut event)? {
             Verdict::Drop => return Ok(xdp_action::XDP_DROP),
             Verdict::Pass => {}
         },
         ETH_P_IPV6 => parse_v6(ctx, &mut event)?,
-        ETH_P_ARP => {
-            event.net_proto = NP_ARP;
-            event.size = (ctx.data_end() - ctx.data()) as u32;
-            submit(event);
-            return Ok(xdp_action::XDP_PASS);
-        }
+        ETH_P_ARP => parse_arp(ctx, &mut event)?,
         _ => return Ok(xdp_action::XDP_PASS),
     }
-
     submit(event);
     Ok(xdp_action::XDP_PASS)
 }
@@ -236,7 +253,7 @@ fn parse_v4(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<Verdict, ()> {
     let ip = ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
     let saddr = unsafe { (*ip).saddr };
 
-    // Filter check on the source IP (this is ingress, so "remote" = source).
+    // Filter check
     if should_block(ipv4_listed(saddr)) {
         return Ok(Verdict::Drop);
     }
@@ -275,7 +292,11 @@ fn parse_v6(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<(), ()> {
 
     parse_l4(ctx, ETH_HDR_LEN + 40, next, ev, true)
 }
-
+fn parse_arp(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<(), ()> {
+    ev.net_proto = NP_ARP;
+    ev.is_ipv6 = 0;
+    Ok(())
+}
 fn parse_l4(
     ctx: &XdpContext,
     off: usize,
@@ -338,15 +359,12 @@ fn try_egress(ctx: ProbeContext, l4: u8) -> Result<(), i64> {
         return Ok(());
     }
 
-    let family: u16 = unsafe {
-        bpf_probe_read_kernel(sk.add(SKC_FAMILY_OFF) as *const u16).map_err(|_| 0i64)?
-    };
-    let dport_be: u16 = unsafe {
-        bpf_probe_read_kernel(sk.add(SKC_DPORT_OFF) as *const u16).map_err(|_| 0i64)?
-    };
-    let local_port: u16 = unsafe {
-        bpf_probe_read_kernel(sk.add(SKC_NUM_OFF) as *const u16).map_err(|_| 0i64)?
-    };
+    let family: u16 =
+        unsafe { bpf_probe_read_kernel(sk.add(SKC_FAMILY_OFF) as *const u16).map_err(|_| 0i64)? };
+    let dport_be: u16 =
+        unsafe { bpf_probe_read_kernel(sk.add(SKC_DPORT_OFF) as *const u16).map_err(|_| 0i64)? };
+    let local_port: u16 =
+        unsafe { bpf_probe_read_kernel(sk.add(SKC_NUM_OFF) as *const u16).map_err(|_| 0i64)? };
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
 
@@ -376,18 +394,12 @@ fn try_egress(ctx: ProbeContext, l4: u8) -> Result<(), i64> {
             matched = ipv4_listed(daddr_be);
         }
     } else if family == AF_INET6 {
-        // IPv6 destination is left zero; userspace correlates the 5-tuple
-        // via /proc/net/{tcp6,udp6} keyed on (pid, local_port).
         event.net_proto = NP_IPV6;
         event.is_ipv6 = 1;
     } else {
         return Ok(());
     }
 
-    // For egress we can't drop the packet from a kprobe (it has already
-    // entered the send path). We simply suppress the event so the user
-    // doesn't see the traffic in the snapshot. Real egress blocking would
-    // need a TC clsact or BPF_CGROUP_INET_EGRESS program.
     if should_block(matched) {
         return Ok(());
     }
@@ -396,14 +408,10 @@ fn try_egress(ctx: ProbeContext, l4: u8) -> Result<(), i64> {
     Ok(())
 }
 
-// ---------- Panic / license ---------------------------------------------
+// ---------- Panic  ---------------------------------------------
 
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
-
-#[unsafe(link_section = "license")]
-#[unsafe(no_mangle)]
-static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";

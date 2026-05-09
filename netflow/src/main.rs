@@ -1,9 +1,3 @@
-//! Tauri entry point for netflow.
-//!
-//! The Rust backend owns a `Monitor` (eBPF programs + ringbuf reader +
-//! archiver). The frontend invokes commands defined here via the Tauri
-//! `invoke()` bridge.
-
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
@@ -84,7 +78,6 @@ fn clear_ip_filter(monitor: tauri::State<'_, Monitor>) {
 }
 
 /// Save a bounded XML history file. The frontend uses the dialog plugin to
-/// pick the destination before invoking this.
 #[tauri::command]
 fn export_history(
     path: String,
@@ -96,7 +89,6 @@ fn export_history(
         .map_err(|e| e.to_string())
 }
 
-// ---------- Bootstrap -----------------------------------------------------
 
 fn pick_default_iface() -> String {
     let interfaces = available_interfaces();
@@ -165,7 +157,7 @@ fn main() {
         iface,
         archive.display()
     );
-
+    // Important Note
     // Keep the tokio runtime alive for the lifetime of the Tauri app so
     // the ringbuf reader / archiver / geo worker tasks keep ticking.
     let _runtime_guard = runtime;
