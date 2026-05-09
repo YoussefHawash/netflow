@@ -1,10 +1,13 @@
-//! Procfs / sysfs enrichment.
+//! /proc and /sys enrichment used at snapshot time.
 //!
-//! Used at snapshot time to:
-//!   * resolve the PID owning a (local_port, L4) socket (XDP can't tell us)
-//!   * fetch process name / user / thread list
-//!   * fetch the kernel-side connection state ("ESTABLISHED", "TIME_WAIT", …)
-//!   * enumerate available network interfaces
+//! At each snapshot, [`ProcCache::refresh`] rebuilds:
+//!   * the `(l4, ipv6, local_port, remote, remote_port) -> (inode, state)`
+//!     map from `/proc/net/{tcp,tcp6,udp,udp6}`
+//!   * the `socket_inode -> pid` map from `/proc/<pid>/fd/*` symlinks
+//!
+//! Process name / user / thread list are loaded lazily per snapshot.
+//! The UID -> username table is preserved across refreshes since it
+//! virtually never changes at runtime.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -18,7 +21,6 @@ use crate::ThreadInfo;
 const PROC: &str = "/proc";
 const SYS_NET: &str = "/sys/class/net";
 
-/// All interfaces present in /sys/class/net.
 pub fn available_interfaces() -> Vec<String> {
     let Ok(rd) = fs::read_dir(SYS_NET) else {
         return Vec::new();
@@ -31,11 +33,9 @@ pub fn available_interfaces() -> Vec<String> {
     out
 }
 
-/// /sys/class/net/<iface>/ifindex.
 pub fn ifindex_of(iface: &str) -> Option<u32> {
     let path: PathBuf = [SYS_NET, iface, "ifindex"].iter().collect();
-    let s = fs::read_to_string(path).ok()?;
-    s.trim().parse::<u32>().ok()
+    fs::read_to_string(path).ok()?.trim().parse::<u32>().ok()
 }
 
 #[derive(Clone, Copy)]
@@ -44,13 +44,13 @@ struct ConnInfo {
     state: &'static str,
 }
 
-/// One key per (l4, is_ipv6, local_port). Multiple sockets can share a
-/// local port (e.g. SO_REUSEPORT, listening + ephemeral); we keep the most
-/// recent one we saw, which is fine for the common case.
-type ConnByPort = HashMap<(u8, bool, u16), ConnInfo>;
+/// Full 5-tuple key. Storing the remote address/port distinguishes
+/// listening sockets from established connections to/from the same local
+/// port, which is what makes the PID backfill work for incoming traffic.
+type ConnKey = (u8, bool, u16, [u8; 16], u16);
 
 pub struct ProcCache {
-    conn_by_port: ConnByPort,
+    conns: HashMap<ConnKey, ConnInfo>,
     inode_to_pid: HashMap<u64, u32>,
     proc_info: HashMap<u32, (String, String)>,
     thread_cache: HashMap<u32, Vec<ThreadInfo>>,
@@ -60,7 +60,7 @@ pub struct ProcCache {
 impl ProcCache {
     pub fn new() -> Self {
         Self {
-            conn_by_port: HashMap::new(),
+            conns: HashMap::new(),
             inode_to_pid: HashMap::new(),
             proc_info: HashMap::new(),
             thread_cache: HashMap::new(),
@@ -68,32 +68,65 @@ impl ProcCache {
         }
     }
 
-    /// Rebuild the per-snapshot caches. The user_cache is preserved across
-    /// refreshes since UID->name almost never changes at runtime.
     pub fn refresh(&mut self) {
-        self.conn_by_port.clear();
+        self.conns.clear();
         self.proc_info.clear();
         self.thread_cache.clear();
 
         let tcp = L4Proto::Tcp as u8;
         let udp = L4Proto::Udp as u8;
-        load_proc_net("/proc/net/tcp", tcp, false, &mut self.conn_by_port);
-        load_proc_net("/proc/net/tcp6", tcp, true, &mut self.conn_by_port);
-        load_proc_net("/proc/net/udp", udp, false, &mut self.conn_by_port);
-        load_proc_net("/proc/net/udp6", udp, true, &mut self.conn_by_port);
+        load_proc_net("/proc/net/tcp", tcp, false, &mut self.conns);
+        load_proc_net("/proc/net/tcp6", tcp, true, &mut self.conns);
+        load_proc_net("/proc/net/udp", udp, false, &mut self.conns);
+        load_proc_net("/proc/net/udp6", udp, true, &mut self.conns);
 
         self.inode_to_pid = build_inode_map();
     }
 
-    pub fn pid_for_socket(&self, local_port: u16, l4: u8, is_ipv6: bool) -> Option<u32> {
-        let info = self.conn_by_port.get(&(l4, is_ipv6, local_port))?;
-        self.inode_to_pid.get(&info.inode).copied()
+    pub fn pid_for_socket(
+        &self,
+        local_port: u16,
+        l4: u8,
+        is_ipv6: bool,
+        remote: &[u8; 16],
+        remote_port: u16,
+    ) -> Option<u32> {
+        if let Some(info) = self.conns.get(&(l4, is_ipv6, local_port, *remote, remote_port)) {
+            if let Some(pid) = self.inode_to_pid.get(&info.inode).copied() {
+                return Some(pid);
+            }
+        }
+        // Fall back to local-port-only match. Useful when:
+        //   * the kernel hasn't filled in the remote yet (SYN_SENT)
+        //   * we're looking at a listening socket
+        //   * we have an IPv6 egress event with zero remote bytes
+        for ((l4_k, ipv6_k, port_k, _, _), info) in &self.conns {
+            if *l4_k == l4 && *ipv6_k == is_ipv6 && *port_k == local_port {
+                if let Some(pid) = self.inode_to_pid.get(&info.inode).copied() {
+                    return Some(pid);
+                }
+            }
+        }
+        None
     }
 
-    pub fn conn_state(&self, local_port: u16, l4: u8, is_ipv6: bool) -> Option<String> {
-        self.conn_by_port
-            .get(&(l4, is_ipv6, local_port))
-            .map(|i| i.state.to_string())
+    pub fn conn_state(
+        &self,
+        local_port: u16,
+        l4: u8,
+        is_ipv6: bool,
+        remote: &[u8; 16],
+        remote_port: u16,
+    ) -> Option<String> {
+        if let Some(info) = self.conns.get(&(l4, is_ipv6, local_port, *remote, remote_port)) {
+            return Some(info.state.to_string());
+        }
+        for ((l4_k, ipv6_k, port_k, _, _), info) in &self.conns {
+            if *l4_k == l4 && *ipv6_k == is_ipv6 && *port_k == local_port {
+                return Some(info.state.to_string());
+            }
+        }
+        None
     }
 
     pub fn process_info(&mut self, pid: u32) -> (String, String) {
@@ -105,17 +138,12 @@ impl ProcCache {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
-        let uid = read_real_uid(pid);
-        let user = match uid {
-            Some(uid) => {
-                if let Some(u) = self.user_cache.get(&uid) {
-                    u.clone()
-                } else {
-                    let u = uid_to_username(uid).unwrap_or_else(|| uid.to_string());
-                    self.user_cache.insert(uid, u.clone());
-                    u
-                }
-            }
+        let user = match read_real_uid(pid) {
+            Some(uid) => self
+                .user_cache
+                .entry(uid)
+                .or_insert_with(|| uid_to_username(uid).unwrap_or_else(|| uid.to_string()))
+                .clone(),
             None => String::new(),
         };
 
@@ -133,9 +161,7 @@ impl ProcCache {
             for entry in rd.flatten() {
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else { continue };
-                let Ok(tid) = name.parse::<u32>() else {
-                    continue;
-                };
+                let Ok(tid) = name.parse::<u32>() else { continue };
                 let comm = fs::read_to_string(format!("{PROC}/{pid}/task/{tid}/comm"))
                     .ok()
                     .map(|s| s.trim().to_string())
@@ -150,8 +176,14 @@ impl ProcCache {
 }
 
 // ---------- /proc/net/{tcp,tcp6,udp,udp6} parser --------------------------
+//
+// Format (whitespace-separated, header line skipped):
+//   sl  local_address rem_address st tx:rx tr:tm retr uid timeout inode ...
+// IP addresses are kernel u32s (or four u32s for v6) written as hex in the
+// host's byte order; we reverse them with `to_le_bytes` so the output
+// matches network-order bytes (which is what the eBPF PacketEvent carries).
 
-fn load_proc_net(path: &str, l4: u8, is_ipv6: bool, out: &mut ConnByPort) {
+fn load_proc_net(path: &str, l4: u8, is_ipv6: bool, out: &mut HashMap<ConnKey, ConnInfo>) {
     let Ok(content) = fs::read_to_string(path) else {
         return;
     };
@@ -160,20 +192,62 @@ fn load_proc_net(path: &str, l4: u8, is_ipv6: bool, out: &mut ConnByPort) {
         if parts.len() < 10 {
             continue;
         }
-        let Some(port_hex) = parts[1].split(':').nth(1) else {
+
+        let Some((local_addr, local_port)) = parse_addr_port(parts[1], is_ipv6) else {
             continue;
         };
-        let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+        let Some((remote_addr, remote_port)) = parse_addr_port(parts[2], is_ipv6) else {
             continue;
         };
+
+        let _ = local_addr; // unused: the eBPF side doesn't carry our local IP
+
         let state = if l4 == L4Proto::Tcp as u8 {
             tcp_state(parts[3])
         } else {
             udp_state(parts[3])
         };
         let inode: u64 = parts[9].parse().unwrap_or(0);
-        out.insert((l4, is_ipv6, port), ConnInfo { inode, state });
+
+        out.insert(
+            (l4, is_ipv6, local_port, remote_addr, remote_port),
+            ConnInfo { inode, state },
+        );
     }
+}
+
+fn parse_addr_port(field: &str, is_ipv6: bool) -> Option<([u8; 16], u16)> {
+    let mut parts = field.split(':');
+    let addr_hex = parts.next()?;
+    let port_hex = parts.next()?;
+    let port = u16::from_str_radix(port_hex, 16).ok()?;
+    let addr = if is_ipv6 {
+        parse_v6(addr_hex)?
+    } else {
+        let v4 = parse_v4(addr_hex)?;
+        let mut bytes = [0u8; 16];
+        bytes[..4].copy_from_slice(&v4);
+        bytes
+    };
+    Some((addr, port))
+}
+
+fn parse_v4(hex: &str) -> Option<[u8; 4]> {
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(v.to_le_bytes())
+}
+
+fn parse_v6(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..4 {
+        let chunk = &hex[i * 8..i * 8 + 8];
+        let v = u32::from_str_radix(chunk, 16).ok()?;
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    Some(out)
 }
 
 fn tcp_state(hex: &str) -> &'static str {
@@ -201,7 +275,7 @@ fn udp_state(hex: &str) -> &'static str {
     }
 }
 
-// ---------- inode -> PID map (/proc/*/fd/*) -------------------------------
+// ---------- inode -> PID via /proc/<pid>/fd/* -----------------------------
 
 fn build_inode_map() -> HashMap<u64, u32> {
     let mut map = HashMap::new();
@@ -211,9 +285,7 @@ fn build_inode_map() -> HashMap<u64, u32> {
     for entry in rd.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
+        let Ok(pid) = name.parse::<u32>() else { continue };
         let fd_dir = entry.path().join("fd");
         let Ok(fds) = fs::read_dir(&fd_dir) else {
             continue;
@@ -235,7 +307,7 @@ fn build_inode_map() -> HashMap<u64, u32> {
     map
 }
 
-// ---------- /proc/[pid]/status real UID + libc lookup ---------------------
+// ---------- /proc/<pid>/status real UID + libc lookup --------------------
 
 fn read_real_uid(pid: u32) -> Option<u32> {
     let s = fs::read_to_string(format!("{PROC}/{pid}/status")).ok()?;

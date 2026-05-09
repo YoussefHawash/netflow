@@ -1,2 +1,10 @@
 [target."cfg(all())"]
-runner = "sudo -E"
+# `sudo -E` is silently ignored on Ubuntu's default sudoers (env_reset),
+# which strips DISPLAY/XAUTHORITY/WAYLAND_DISPLAY and breaks GTK init when
+# the Tauri binary launches as root. `--preserve-env=...` whitelists the
+# specific variables GTK / Wayland / D-Bus need, regardless of sudoers
+# policy.
+runner = [
+    "sudo",
+    "--preserve-env=DISPLAY,XAUTHORITY,WAYLAND_DISPLAY,XDG_RUNTIME_DIR,XDG_DATA_DIRS,XDG_SESSION_TYPE,DBUS_SESSION_BUS_ADDRESS,HOME,USER,LANG,GTK_PATH,GDK_BACKEND,RUST_LOG,RUST_BACKTRACE,NETFLOW_ARCHIVE_DIR",
+]

@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color: theme("colors.app.text");
+    background: theme("colors.app.bg");
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply h-screen min-w-[1040px] overflow-hidden bg-app-bg font-sans text-[13px] leading-[1.4] text-app-text;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    @apply outline-none;
+  }
+
+  #app {
+    @apply h-screen;
+  }
+}

@@ -1,15 +1,25 @@
-//! Loads the embedded eBPF object, attaches XDP to the requested interface
-//! and the egress kprobes to `tcp_sendmsg` / `udp_sendmsg`, then returns
-//! ownership of the events ring buffer to the caller.
+//! Loads the embedded eBPF object, attaches XDP to the requested
+//! interface and the egress kprobes to `tcp_sendmsg` / `udp_sendmsg`,
+//! and pulls out the maps userspace needs to talk back to the kernel
+//! (the events ring buffer + the three filter maps).
 
 use anyhow::{Context, Result};
 use aya::{
-    maps::RingBuf,
-    programs::{KProbe, Xdp, XdpFlags},
+    maps::{Array, HashMap, MapData, RingBuf},
+    programs::{xdp::XdpLinkId, KProbe, Xdp, XdpFlags},
     Ebpf,
 };
 
-pub fn load(interface: &str) -> Result<(Ebpf, RingBuf<aya::maps::MapData>)> {
+use crate::filter::FilterMaps;
+
+pub struct LoadedPrograms {
+    pub ebpf: Ebpf,
+    pub events: RingBuf<MapData>,
+    pub xdp_link: XdpLinkId,
+    pub filter: FilterMaps,
+}
+
+pub fn load(interface: &str) -> Result<LoadedPrograms> {
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/netflow"
@@ -22,9 +32,7 @@ pub fn load(interface: &str) -> Result<(Ebpf, RingBuf<aya::maps::MapData>)> {
         .context("xdp program 'netflow' missing from object")?
         .try_into()?;
     xdp.load().context("loading xdp program")?;
-    xdp.attach(interface, XdpFlags::default())
-        .or_else(|_| xdp.attach(interface, XdpFlags::SKB_MODE))
-        .with_context(|| format!("attaching XDP to {interface}"))?;
+    let xdp_link = attach_xdp(xdp, interface)?;
 
     // Egress kprobes.
     for sym in ["tcp_sendmsg", "udp_sendmsg"] {
@@ -37,10 +45,38 @@ pub fn load(interface: &str) -> Result<(Ebpf, RingBuf<aya::maps::MapData>)> {
             .with_context(|| format!("attaching kprobe to {sym}"))?;
     }
 
-    let ring_buf = RingBuf::try_from(
+    let events = RingBuf::try_from(
         ebpf.take_map("EVENTS")
             .context("EVENTS ring buffer not found")?,
     )?;
 
-    Ok((ebpf, ring_buf))
+    let mode = Array::<MapData, u32>::try_from(
+        ebpf.take_map("FILTER_MODE")
+            .context("FILTER_MODE map not found")?,
+    )?;
+    let pids = HashMap::<MapData, u32, u8>::try_from(
+        ebpf.take_map("FILTER_PIDS")
+            .context("FILTER_PIDS map not found")?,
+    )?;
+    let ipv4 = HashMap::<MapData, u32, u8>::try_from(
+        ebpf.take_map("FILTER_IPS_V4")
+            .context("FILTER_IPS_V4 map not found")?,
+    )?;
+
+    let filter = FilterMaps::new(mode, pids, ipv4);
+
+    Ok(LoadedPrograms {
+        ebpf,
+        events,
+        xdp_link,
+        filter,
+    })
+}
+
+/// Attach XDP to `interface`, falling back to SKB mode if the driver
+/// doesn't support native mode.
+pub fn attach_xdp(xdp: &mut Xdp, interface: &str) -> Result<XdpLinkId> {
+    xdp.attach(interface, XdpFlags::default())
+        .or_else(|_| xdp.attach(interface, XdpFlags::SKB_MODE))
+        .with_context(|| format!("attaching XDP to {interface}"))
 }

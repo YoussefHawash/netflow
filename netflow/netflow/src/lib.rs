@@ -1,44 +1,36 @@
 //! netflow — eBPF-backed live network monitor.
 //!
-//! Runs an XDP program (ingress) and kprobes on `tcp_sendmsg` /
-//! `udp_sendmsg` (egress) that push every observed packet/send into a ring
-//! buffer. A background task drains that ring into an aggregated state
-//! struct. Calling [`Monitor::snapshot`] returns the current view as a
-//! [`MonitorSnapshot`] and ships the just-completed epoch's data to the XML
-//! archiver, so every byte is either visible in the live snapshot or
-//! persisted on disk.
+//! Architecture:
+//!   * eBPF (XDP + kprobes on tcp/udp_sendmsg) writes one PacketEvent per
+//!     packet/send into a 1 MiB ring buffer.
+//!   * A background tokio task drains the ring buffer into a per-connection
+//!     aggregator behind a Mutex.
+//!   * Calling `Monitor::snapshot()` builds the live `MonitorSnapshot` and
+//!     ships the just-completed epoch as XML to the archiver task.
+//!   * eBPF-side filter maps (`set_filter_mode`, `add_filter_pid`,
+//!     `add_filter_ipv4`) drop or hide traffic in-kernel.
 //!
-//! The shape of `Monitor` is deliberately Tauri-friendly:
-//!
-//! ```ignore
-//! // In your Tauri app:
-//! let monitor = Monitor::new(MonitorConfig::default()).await?;
-//! tauri::Builder::default()
-//!     .manage(monitor)
-//!     .invoke_handler(tauri::generate_handler![get_snapshot])
-//!     .run(tauri::generate_context!())?;
-//!
-//! #[tauri::command]
-//! fn get_snapshot(monitor: tauri::State<Monitor>) -> MonitorSnapshot {
-//!     monitor.snapshot()
-//! }
-//! ```
+//! `Monitor` is `Send + Sync` and designed to live inside `tauri::State`.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use aya::programs::Xdp;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 mod archiver;
+mod filter;
+mod geo;
 mod loader;
 mod proc_fs;
 mod reader;
 mod state;
 
+pub use filter::{FilterMode, FilterState};
 pub use proc_fs::available_interfaces;
 
 // ---------- Public snapshot types -----------------------------------------
@@ -103,43 +95,13 @@ pub struct HistoryBucket {
     pub sent: f64,
 }
 
-// Mirrors of the kernel-side enums; kept here so consumers don't have to
-// pull in netflow-common.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum Protocol {
-    Unknown,
-    IPv4,
-    IPv6,
-    ARP,
-    TCP,
-    UDP,
-    ICMPv4,
-    ICMPv6,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParsedPacket {
-    pub net_proto: Protocol,
-    pub transport_proto: Protocol,
-    pub remote: [u8; 16],
-    pub remote_port: Option<u16>,
-    pub local_port: Option<u16>,
-    pub size: u16,
-    pub outbound: bool,
-    pub is_ipv6: bool,
-}
-
 // ---------- Monitor configuration -----------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
-    /// Interface to attach XDP to (e.g. "eth0", "wlan0").
     pub interface: String,
-    /// Directory where per-snapshot XML archives are written.
     pub archive_dir: PathBuf,
-    /// How many recent buckets to keep live in `MonitorSnapshot::history`.
     pub history_buckets: usize,
-    /// Per-process history length (`ProcessTraffic::history`).
     pub proc_history_len: usize,
 }
 
@@ -158,29 +120,32 @@ impl Default for MonitorConfig {
 
 pub struct Monitor {
     inner: Arc<Inner>,
-    // Keep the Ebpf object alive for the lifetime of the Monitor so the
-    // programs stay attached to the kernel.
-    _ebpf: Mutex<aya::Ebpf>,
+    /// Holds the loaded eBPF object; dropping it detaches every program.
+    /// Behind a Mutex because `switch_interface` needs `&mut Ebpf`.
+    ebpf: Arc<Mutex<aya::Ebpf>>,
+    xdp_link: Mutex<Option<aya::programs::xdp::XdpLinkId>>,
     _tasks: Vec<JoinHandle<()>>,
 }
 
 pub(crate) struct Inner {
     pub state: Mutex<state::State>,
     pub archive_tx: mpsc::UnboundedSender<archiver::ArchiveJob>,
-    pub config: MonitorConfig,
+    pub filter: Mutex<filter::FilterMaps>,
 }
 
 impl Monitor {
-    /// Loads the eBPF programs, attaches them, and starts the background
-    /// drain + archive tasks. Requires CAP_BPF / CAP_NET_ADMIN (i.e. root).
     pub async fn new(config: MonitorConfig) -> Result<Self> {
         bump_memlock_rlimit();
 
-        let (mut ebpf, ring_buf) = loader::load(&config.interface)?;
+        let loader::LoadedPrograms {
+            ebpf,
+            events,
+            xdp_link,
+            filter,
+        } = loader::load(&config.interface)?;
 
         let (archive_tx, archive_rx) = mpsc::unbounded_channel();
 
-        // Ensure the archive directory exists.
         if let Err(e) = std::fs::create_dir_all(&config.archive_dir) {
             log::warn!(
                 "could not create archive dir {:?}: {e}",
@@ -190,57 +155,124 @@ impl Monitor {
 
         let iface_index = proc_fs::ifindex_of(&config.interface);
 
+        let geo = geo::GeoCache::new();
+
         let inner = Arc::new(Inner {
             state: Mutex::new(state::State::new(
                 config.interface.clone(),
                 iface_index,
                 config.history_buckets,
                 config.proc_history_len,
+                geo,
             )),
             archive_tx,
-            config: config.clone(),
+            filter: Mutex::new(filter),
         });
 
-        // Wire up the eBPF logger if any log statements remain.
-        if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-            log::debug!("ebpf logger not initialized: {e}");
-        }
-
-        let mut tasks = Vec::new();
-
-        tasks.push(tokio::spawn(reader::run(
-            ring_buf,
-            Arc::clone(&inner),
-        )));
-
-        tasks.push(tokio::spawn(archiver::run(
-            archive_rx,
-            config.archive_dir.clone(),
-        )));
+        let tasks = vec![
+            tokio::spawn(reader::run(events, Arc::clone(&inner))),
+            tokio::spawn(archiver::run(archive_rx, config.archive_dir.clone())),
+        ];
 
         Ok(Self {
             inner,
-            _ebpf: Mutex::new(ebpf),
+            ebpf: Arc::new(Mutex::new(ebpf)),
+            xdp_link: Mutex::new(Some(xdp_link)),
             _tasks: tasks,
         })
     }
 
-    /// Build the live snapshot, queue the just-completed epoch for XML
-    /// archival, and reset the per-epoch counters. Safe to call from any
-    /// thread; the implementation is sync so it can be wrapped directly in
-    /// a Tauri command.
+    /// Build the live snapshot and ship the just-completed epoch to the
+    /// archiver. Sync — safe to call from a Tauri command handler.
     pub fn snapshot(&self) -> MonitorSnapshot {
         let mut state = self.inner.state.lock().unwrap();
-        let (snapshot, archive_job) = state.take_snapshot(&self.inner.config);
+        let (snapshot, archive_job) = state.take_snapshot();
         drop(state);
-
-        // Best-effort send; if the archiver task is gone we silently drop.
         let _ = self.inner.archive_tx.send(archive_job);
         snapshot
     }
 
     pub fn interface(&self) -> String {
-        self.inner.config.interface.clone()
+        self.inner.state.lock().unwrap().interface().to_string()
+    }
+
+    /// Detach XDP from the current interface and re-attach to `iface`.
+    pub fn switch_interface(&self, iface: &str) -> Result<()> {
+        if iface.is_empty() || iface == self.interface() {
+            return Ok(());
+        }
+        let new_index = proc_fs::ifindex_of(iface)
+            .ok_or_else(|| anyhow!("interface '{iface}' does not exist"))?;
+
+        let mut ebpf = self.ebpf.lock().unwrap();
+        let xdp: &mut Xdp = ebpf
+            .program_mut("netflow")
+            .ok_or_else(|| anyhow!("xdp program missing"))?
+            .try_into()?;
+
+        let mut link_slot = self.xdp_link.lock().unwrap();
+        if let Some(prev) = link_slot.take() {
+            let _ = xdp.detach(prev);
+        }
+        let new_link = loader::attach_xdp(xdp, iface)?;
+        *link_slot = Some(new_link);
+        drop(link_slot);
+        drop(ebpf);
+
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .set_interface(iface.to_string(), Some(new_index));
+
+        log::info!("switched capture interface to {iface}");
+        Ok(())
+    }
+
+    // ---- Filter API ------------------------------------------------------
+
+    pub fn set_filter_mode(&self, mode: FilterMode) -> Result<()> {
+        self.inner.filter.lock().unwrap().set_mode(mode)
+    }
+
+    pub fn add_filter_pid(&self, pid: u32) -> Result<()> {
+        self.inner.filter.lock().unwrap().add_pid(pid)
+    }
+
+    pub fn remove_filter_pid(&self, pid: u32) {
+        self.inner.filter.lock().unwrap().remove_pid(pid);
+    }
+
+    pub fn add_filter_ipv4(&self, addr: Ipv4Addr) -> Result<()> {
+        self.inner.filter.lock().unwrap().add_ipv4(addr)
+    }
+
+    pub fn remove_filter_ipv4(&self, addr: Ipv4Addr) {
+        self.inner.filter.lock().unwrap().remove_ipv4(addr);
+    }
+
+    pub fn clear_filter_pids(&self) {
+        self.inner.filter.lock().unwrap().clear_pids();
+    }
+
+    pub fn clear_filter_ipv4(&self) {
+        self.inner.filter.lock().unwrap().clear_ipv4();
+    }
+
+    pub fn filter_state(&self) -> FilterState {
+        self.inner.filter.lock().unwrap().snapshot()
+    }
+
+    /// Write a self-contained XML rollup of the most recent snapshot to
+    /// `path`. Useful for the "Save history" button in the UI.
+    pub fn export_history(&self, path: &Path) -> Result<()> {
+        let snap = self.snapshot();
+        let xml = quick_xml::se::to_string_with_root("monitorSnapshot", &snap)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(path, xml)?;
+        Ok(())
     }
 }
 

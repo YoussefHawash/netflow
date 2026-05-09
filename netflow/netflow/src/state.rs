@@ -2,18 +2,19 @@
 //! `MonitorSnapshot`s on demand.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::time::Instant;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate};
-use netflow_common::{L4Proto, PacketEvent, DIR_IN, DIR_OUT};
+use netflow_common::{L4Proto, PacketEvent, DIR_OUT, DIR_IN};
 
 use crate::archiver::ArchiveJob;
+use crate::geo::GeoCache;
 use crate::proc_fs::{self, ProcCache};
-use crate::{
-    ConnectionTraffic, HistoryBucket, MonitorConfig, MonitorSnapshot, ProcessTraffic,
-};
+use crate::{ConnectionTraffic, HistoryBucket, MonitorSnapshot, ProcessTraffic};
 
+/// Connection key — full 5-tuple. Matches what we emit from eBPF.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct ConnKey {
     pub local_port: u16,
@@ -42,6 +43,8 @@ impl ConnAgg {
     }
 }
 
+const STALE_CONN_TTL: Duration = Duration::from_secs(60);
+
 pub struct State {
     started_at: Instant,
     last_snapshot_at: Instant,
@@ -65,6 +68,7 @@ pub struct State {
     proc_history: HashMap<u32, VecDeque<f64>>,
 
     proc_cache: ProcCache,
+    geo: Arc<GeoCache>,
 }
 
 impl State {
@@ -73,6 +77,7 @@ impl State {
         iface_index: Option<u32>,
         history_buckets: usize,
         proc_history_len: usize,
+        geo: Arc<GeoCache>,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -91,13 +96,28 @@ impl State {
             history: VecDeque::with_capacity(history_buckets),
             proc_history: HashMap::new(),
             proc_cache: ProcCache::new(),
+            geo,
         }
     }
 
+    pub fn interface(&self) -> &str {
+        &self.iface
+    }
+
+    pub fn set_interface(&mut self, iface: String, iface_index: Option<u32>) {
+        self.iface = iface;
+        self.iface_index = iface_index;
+        self.conns.clear();
+        self.proc_history.clear();
+        self.history.clear();
+        self.epoch_in = 0;
+        self.epoch_out = 0;
+        self.last_snapshot_at = Instant::now();
+    }
+
     pub fn ingest(&mut self, ev: &PacketEvent) {
-        // Filter ingress events that aren't on the selected interface; we
-        // never get an ifindex for egress (kprobes are global), so they
-        // always pass.
+        // Ingress events that aren't on the active interface are noise.
+        // Egress comes from kprobes (no ifindex) and always passes through.
         if ev.direction == DIR_IN {
             if let Some(want) = self.iface_index {
                 if ev.ifindex != want {
@@ -129,11 +149,11 @@ impl State {
         }
     }
 
-    pub fn take_snapshot(&mut self, _config: &MonitorConfig) -> (MonitorSnapshot, ArchiveJob) {
+    pub fn take_snapshot(&mut self) -> (MonitorSnapshot, ArchiveJob) {
         let now = Instant::now();
         let elapsed = (now - self.last_snapshot_at).as_secs_f64().max(0.001);
 
-        // Roll daily totals over at local midnight.
+        // Roll daily totals at local midnight.
         let today = Local::now().date_naive();
         if today != self.today_date {
             self.today_date = today;
@@ -146,28 +166,28 @@ impl State {
         let received_rate = self.epoch_in as f64 / elapsed;
         let sent_rate = self.epoch_out as f64 / elapsed;
 
-        // Refresh socket -> PID + state lookups for this snapshot.
         self.proc_cache.refresh();
 
-        // Backfill PIDs on connections seen by XDP (ingress) but never by
-        // a kprobe.
+        // Backfill PIDs on connections seen by XDP only.
         for (key, agg) in self.conns.iter_mut() {
             if agg.last_pid == 0 {
                 if let Some(pid) = self.proc_cache.pid_for_socket(
                     key.local_port,
                     key.l4,
                     key.is_ipv6,
+                    &key.remote,
+                    key.remote_port,
                 ) {
                     agg.last_pid = pid;
                 }
             }
         }
 
-        // Per-PID rollups for the processes list.
-        let mut per_proc: HashMap<u32, (u64, u64, ProtoMix)> = HashMap::new();
+        // Per-PID rollup table feeds ProcessTraffic.
+        let mut per_proc: HashMap<u32, ProcRollup> = HashMap::new();
         let mut connections = Vec::with_capacity(self.conns.len());
 
-        for (key, agg) in self.conns.iter() {
+        for (key, agg) in &self.conns {
             let l4 = L4Proto::from_u8(key.l4);
             let proto_str = l4_str(l4).to_string();
             let pid = agg.last_pid;
@@ -180,12 +200,21 @@ impl State {
 
             let state_str = self
                 .proc_cache
-                .conn_state(key.local_port, key.l4, key.is_ipv6)
+                .conn_state(
+                    key.local_port,
+                    key.l4,
+                    key.is_ipv6,
+                    &key.remote,
+                    key.remote_port,
+                )
                 .unwrap_or_else(|| "UNKNOWN".to_string());
 
+            let remote_ip = ip_from_bytes(&key.remote, key.is_ipv6);
+            let flag = self.geo.lookup(remote_ip);
+
             connections.push(ConnectionTraffic {
-                remote: format_addr(&key.remote, key.is_ipv6),
-                flag: String::new(),
+                remote: remote_ip.to_string(),
+                flag: flag.clone(),
                 port: key.remote_port,
                 local_port: key.local_port,
                 protocol: proto_str.clone(),
@@ -198,21 +227,20 @@ impl State {
             });
 
             if pid != 0 {
-                let entry = per_proc
-                    .entry(pid)
-                    .or_insert_with(|| (0, 0, ProtoMix::new(&proto_str)));
-                entry.0 += agg.received;
-                entry.1 += agg.sent;
-                entry.2.add(&proto_str);
+                let entry = per_proc.entry(pid).or_insert_with(|| ProcRollup::new(&proto_str));
+                entry.received += agg.received;
+                entry.sent += agg.sent;
+                entry.add_proto(&proto_str);
+                entry.note_country(&flag);
             }
         }
 
-        // Build the processes list, refresh per-process history rings.
+        // Build the processes list and refresh per-process history rings.
         let active_pids: HashSet<u32> = per_proc.keys().copied().collect();
         self.proc_history.retain(|pid, _| active_pids.contains(pid));
 
         let mut processes = Vec::with_capacity(per_proc.len());
-        for (pid, (rin, rout, mix)) in per_proc.into_iter() {
+        for (pid, roll) in per_proc.into_iter() {
             let (name, user) = self.proc_cache.process_info(pid);
             let threads = self.proc_cache.threads(pid);
 
@@ -220,7 +248,7 @@ impl State {
                 .proc_history
                 .entry(pid)
                 .or_insert_with(|| VecDeque::with_capacity(self.proc_history_len));
-            hist.push_back((rin + rout) as f64);
+            hist.push_back((roll.received + roll.sent) as f64);
             while hist.len() > self.proc_history_len {
                 hist.pop_front();
             }
@@ -230,10 +258,10 @@ impl State {
                 pid,
                 name,
                 user,
-                flag: String::new(),
-                protocol: mix.into_string(),
-                received: rin as f64,
-                sent: rout as f64,
+                flag: roll.dominant_country(),
+                protocol: roll.proto_label(),
+                received: roll.received as f64,
+                sent: roll.sent as f64,
                 history,
                 threads,
             });
@@ -244,12 +272,11 @@ impl State {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Push the just-completed bucket into history; archive trim-offs are
-        // implicitly covered because we ship every bucket out via the
-        // archive job below.
+        // Push the just-completed bucket into history; archiver gets a copy
+        // so nothing is lost when it's eventually evicted from the ring.
         let label = Local::now().format("%H:%M:%S").to_string();
         let bucket = HistoryBucket {
-            label: label.clone(),
+            label,
             received: self.epoch_in as f64,
             sent: self.epoch_out as f64,
         };
@@ -274,23 +301,72 @@ impl State {
         let archive_job = ArchiveJob {
             timestamp: Local::now(),
             interface: self.iface.clone(),
-            bucket,
             received_rate,
             sent_rate,
+            bucket,
             connections,
             processes,
         };
 
-        // Reset per-epoch counters and prune long-idle connections so the
-        // map stays bounded over time.
+        // Reset epoch counters and prune long-idle connections.
         self.epoch_in = 0;
         self.epoch_out = 0;
         self.last_snapshot_at = now;
-
-        let stale_cutoff = now - std::time::Duration::from_secs(60);
-        self.conns.retain(|_, agg| agg.last_seen >= stale_cutoff);
+        let cutoff = now - STALE_CONN_TTL;
+        self.conns.retain(|_, agg| agg.last_seen >= cutoff);
 
         (snapshot, archive_job)
+    }
+}
+
+/// Per-PID accumulator used while building the snapshot. Kept private so
+/// the public ProcessTraffic stays a plain serializable struct.
+struct ProcRollup {
+    received: u64,
+    sent: u64,
+    first_proto: String,
+    mixed: bool,
+    countries: HashMap<String, u32>,
+}
+
+impl ProcRollup {
+    fn new(first_proto: &str) -> Self {
+        Self {
+            received: 0,
+            sent: 0,
+            first_proto: first_proto.to_string(),
+            mixed: false,
+            countries: HashMap::new(),
+        }
+    }
+
+    fn add_proto(&mut self, proto: &str) {
+        if !self.mixed && proto != self.first_proto {
+            self.mixed = true;
+        }
+    }
+
+    fn proto_label(&self) -> String {
+        if self.mixed {
+            "MIXED".to_string()
+        } else {
+            self.first_proto.clone()
+        }
+    }
+
+    fn note_country(&mut self, code: &str) {
+        if code.is_empty() {
+            return;
+        }
+        *self.countries.entry(code.to_string()).or_insert(0) += 1;
+    }
+
+    fn dominant_country(&self) -> String {
+        self.countries
+            .iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -304,47 +380,10 @@ fn l4_str(l4: L4Proto) -> &'static str {
     }
 }
 
-fn format_addr(remote: &[u8; 16], is_ipv6: bool) -> String {
+fn ip_from_bytes(bytes: &[u8; 16], is_ipv6: bool) -> IpAddr {
     if is_ipv6 {
-        let mut groups = [0u16; 8];
-        for (i, g) in groups.iter_mut().enumerate() {
-            *g = u16::from_be_bytes([remote[i * 2], remote[i * 2 + 1]]);
-        }
-        Ipv6Addr::new(
-            groups[0], groups[1], groups[2], groups[3], groups[4], groups[5], groups[6], groups[7],
-        )
-        .to_string()
+        IpAddr::V6(Ipv6Addr::from(*bytes))
     } else {
-        Ipv4Addr::new(remote[0], remote[1], remote[2], remote[3]).to_string()
-    }
-}
-
-/// Tracks the protocols seen for one process so the snapshot can render
-/// "TCP", "UDP", or "MIXED" depending on the connection mix.
-struct ProtoMix {
-    first: String,
-    mixed: bool,
-}
-
-impl ProtoMix {
-    fn new(first: &str) -> Self {
-        Self {
-            first: first.to_string(),
-            mixed: false,
-        }
-    }
-
-    fn add(&mut self, proto: &str) {
-        if !self.mixed && proto != self.first {
-            self.mixed = true;
-        }
-    }
-
-    fn into_string(self) -> String {
-        if self.mixed {
-            "MIXED".to_string()
-        } else {
-            self.first
-        }
+        IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]))
     }
 }
