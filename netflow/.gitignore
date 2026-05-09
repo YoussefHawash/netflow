@@ -13,8 +13,10 @@ node_modules/
 dist/
 .vite/
 *.log
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
 package-lock.json.bak
 
 # Tauri
 netflow/gen/
-
