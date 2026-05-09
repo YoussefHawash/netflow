@@ -23,12 +23,12 @@ type Props = {
 
 export function ConnectionTable({ connections, sortKey, onSortChange }: Props) {
   return (
-    <section className={cx(panel, "flex h-[360px] flex-col overflow-hidden")}>
+    <section className={cx(panel, "flex h-[380px] flex-col overflow-hidden")}>
       <div className={panelHeader}>
         <div>
-          <div className={panelTitle}>Connections / Remote Hosts</div>
+          <div className={panelTitle}>Remote Connections</div>
           <div className={panelSubtitle}>
-            IP, port, protocol, bandwidth, process, and user mapping
+            Host, port, process, state, and throughput
           </div>
         </div>
         <div className="flex items-center gap-1.5 text-[11px] text-app-muted">
@@ -46,7 +46,7 @@ export function ConnectionTable({ connections, sortKey, onSortChange }: Props) {
         </div>
       </div>
 
-      <div className={cx(tableShell, "min-h-[276px]")}>
+      <div className={cx(tableShell, "min-h-0")}>
         <table className="w-full min-w-[920px] table-fixed border-collapse">
           <colgroup>
             <col className="w-44" />
@@ -108,9 +108,11 @@ function ConnectionRow({
   return (
     <tr className="group/row">
       <td className={td(false)}>
-        <span className="inline-block w-[26px] text-center text-[10px] font-bold text-app-muted">
-          {connection.flag}
-        </span>{" "}
+        {connection.flag && (
+          <span className="mr-2 inline-block min-w-[22px] text-center text-[10px] font-semibold text-app-subtle">
+            {connection.flag}
+          </span>
+        )}
         <span className="font-semibold text-app-text" title={connection.remote}>
           {connection.remote}
         </span>
@@ -142,10 +144,10 @@ function ConnectionRow({
           <span className="text-app-muted/50">—</span>
         )}
       </td>
-      <td className={td(false, cx("text-app-green", numeric))}>
+      <td className={td(false, cx("text-app-blue", numeric))}>
         {formatRate(connection.received)}
       </td>
-      <td className={td(false, cx("text-app-blue", numeric))}>
+      <td className={td(false, cx("text-app-green", numeric))}>
         {formatRate(connection.sent)}
       </td>
       <td className={td(false, cx("font-semibold", numeric))}>
@@ -162,7 +164,7 @@ function stateBadgeClass(state: string) {
   if (state === "LISTEN") {
     return "border-app-blue/30 bg-app-blue/10 text-app-blue";
   }
-  return "border-app-orange/30 bg-app-orange/10 text-app-orange";
+  return "border-app-border bg-app-raised text-app-muted";
 }
 
 function connectionKey(c: GroupedConnection) {

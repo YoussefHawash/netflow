@@ -31,10 +31,10 @@ export function ProcessTable({
   const [expandedPid, setExpandedPid] = useState<number | null>(null);
 
   return (
-    <section className={cx(panel, "flex h-[398px] flex-col overflow-hidden")}>
+    <section className={cx(panel, "flex min-h-0 flex-col overflow-hidden")}>
       <div className={panelHeader}>
         <div>
-          <div className={panelTitle}>Process Network Usage</div>
+          <div className={panelTitle}>Process Usage</div>
         </div>
         <div className="flex items-center gap-1.5 text-[11px] text-app-muted">
           <span>Sort by:</span>
@@ -51,7 +51,7 @@ export function ProcessTable({
         </div>
       </div>
 
-      <div className={cx(tableShell, "min-h-[286px]")}>
+      <div className={cx(tableShell, "min-h-0")}>
         <table className="w-full min-w-[840px] table-fixed border-collapse">
           <colgroup>
             <col className="w-[68px]" />
@@ -102,7 +102,7 @@ export function ProcessTable({
         </table>
       </div>
 
-      <div className="mt-2 text-[11px] text-app-subtle">
+      <div className="mt-3 text-[11px] text-app-subtle">
         Showing {processes.length} of {totalProcessCount} active processes
       </div>
     </section>
@@ -150,8 +150,8 @@ function ProcessRow({
           <button
             type="button"
             className={cx(
-              "min-h-6 rounded-md border border-app-border bg-app-raised px-2 text-[10px] font-semibold text-app-muted transition hover:border-app-blue/40 hover:text-app-text",
-              expanded && "border-app-blueStrong/60 text-app-blue",
+              "min-h-6 rounded-md border border-app-border bg-app-raised px-2 text-[10px] font-semibold text-app-muted transition hover:border-app-muted/50 hover:text-app-text",
+              expanded && "border-app-blue/50 bg-app-blue/10 text-app-blue",
               threadCount === 0 && "cursor-default opacity-60",
             )}
             disabled={threadCount === 0}
@@ -161,10 +161,10 @@ function ProcessRow({
             {threadLabel}
           </button>
         </td>
-        <td className={td(false, cx("text-app-green", numeric))}>
+        <td className={td(false, cx("text-app-blue", numeric))}>
           {formatRate(process.received)}
         </td>
-        <td className={td(false, cx("text-app-blue", numeric))}>
+        <td className={td(false, cx("text-app-green", numeric))}>
           {formatRate(process.sent)}
         </td>
         <td className={td(false, cx("font-semibold", numeric))}>
@@ -173,7 +173,7 @@ function ProcessRow({
       </tr>
       {expanded && (
         <tr>
-          <td className={td(false, "bg-app-raised/30")} colSpan={8}>
+          <td className={td(false, "bg-app-raised/25")} colSpan={8}>
             <ThreadList threads={process.threads} />
           </td>
         </tr>
@@ -191,7 +191,7 @@ function ThreadList({ threads }: { threads: ThreadInfo[] }) {
       {visibleThreads.map((thread) => (
         <span
           key={thread.tid}
-          className="inline-flex max-w-[220px] items-center gap-1 rounded-md border border-app-border bg-app-surface px-2 py-1 text-[10px] text-app-muted"
+          className="inline-flex max-w-[220px] items-center gap-1 rounded-md border border-app-border bg-app-shell px-2 py-1 text-[10px] text-app-muted"
           title={`${thread.tid} ${thread.name}`}
         >
           <span className={cx("font-semibold text-app-text", numeric)}>

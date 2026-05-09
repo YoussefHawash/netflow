@@ -4,26 +4,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Dark UI palette consumed by every component via class names like
-        // "bg-app-surface", "text-app-muted", "border-app-line/30", ...
         app: {
-          bg: "#0d1117",
-          surface: "#161b22",
-          raised: "#1c222a",
-          line: "#21262d",
-          border: "#30363d",
-          text: "#e6edf3",
-          muted: "#9ca3af",
-          subtle: "#6b7280",
-          blue: "#58a6ff",
-          blueStrong: "#1f6feb",
-          cyan: "#56d4dd",
-          green: "#3fb950",
-          orange: "#f0883e",
-          orangeDark: "#cc6929",
-          violet: "#a371f7",
-          yellow: "#d29922",
-          danger: "#f85149",
+          bg: "#111318",
+          shell: "#151820",
+          surface: "#191d26",
+          raised: "#202530",
+          line: "#2a303b",
+          border: "#384150",
+          text: "#f2f4f8",
+          muted: "#a6afbf",
+          subtle: "#737d8f",
+          blue: "#9ab5ff",
+          green: "#8ac7a0",
+          orange: "#d6a15f",
+          danger: "#e18484",
         },
       },
       fontFamily: {

@@ -14,7 +14,7 @@
   }
 
   body {
-    @apply h-screen min-w-[1040px] overflow-hidden bg-app-bg font-sans text-[13px] leading-[1.4] text-app-text;
+    @apply h-screen min-w-[1120px] overflow-hidden bg-app-bg font-sans text-[13px] leading-[1.45] text-app-text;
   }
 
   button {
@@ -29,5 +29,25 @@
 
   #app {
     @apply h-screen;
+  }
+
+  ::selection {
+    @apply bg-app-blue/25 text-app-text;
+  }
+
+  ::-webkit-scrollbar {
+    @apply h-2 w-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-app-border;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-app-muted/50;
   }
 }

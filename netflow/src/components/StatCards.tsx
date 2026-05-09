@@ -16,35 +16,27 @@ export function StatCards({ snapshot, processes, connections }: Props) {
   const hostCount = new Set(connections.map((c) => c.remote)).size;
 
   return (
-    <div className="grid grid-cols-4 gap-2.5">
+    <div className="grid grid-cols-4 gap-4">
       <Card
-        icon="↓"
-        iconClass="bg-app-blueStrong/15"
-        valueClass="text-app-blue"
-        label="Total Received"
+        marker="RX"
+        label="Received"
         value={formatRate(snapshot?.receivedRate ?? 0)}
-        sub=""
+        sub="Current rate"
       />
       <Card
-        icon="↑"
-        iconClass="bg-violet-500/15"
-        valueClass="text-app-violet"
-        label="Total Sent"
+        marker="TX"
+        label="Sent"
         value={formatRate(snapshot?.sentRate ?? 0)}
-        sub=""
+        sub="Current rate"
       />
       <Card
-        icon="⊞"
-        iconClass="bg-app-green/15"
-        valueClass="text-app-green"
+        marker="PID"
         label="Active Processes"
         value={String(processes.length)}
         sub={`${userCount} users`}
       />
       <Card
-        icon="⊕"
-        iconClass="bg-app-orange/15"
-        valueClass="text-app-orange"
+        marker="IP"
         label="Active Connections"
         value={String(connections.length)}
         sub={`${hostCount} remote hosts`}
@@ -54,30 +46,26 @@ export function StatCards({ snapshot, processes, connections }: Props) {
 }
 
 function Card(props: {
-  icon: string;
-  iconClass: string;
-  valueClass: string;
+  marker: string;
   label: string;
   value: string;
   sub: string;
 }) {
   return (
-    <article className="flex min-h-[86px] items-center gap-3 rounded-lg border border-app-line bg-app-surface px-4 py-3.5">
-      <div
-        className={`grid h-[38px] w-[38px] shrink-0 place-items-center rounded-lg text-lg ${props.iconClass}`}
-      >
-        {props.icon}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.6px] text-app-muted">
+    <article className="min-h-[92px] rounded-md border border-app-line bg-app-surface p-4 shadow-[0_1px_0_rgba(255,255,255,0.03)]">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.6px] text-app-subtle">
           {props.label}
         </div>
-        <div
-          className={`overflow-hidden text-ellipsis whitespace-nowrap text-[22px] font-bold leading-tight tabular-nums ${props.valueClass}`}
-        >
+        <div className="rounded border border-app-border bg-app-raised px-1.5 py-0.5 text-[10px] font-semibold text-app-muted">
+          {props.marker}
+        </div>
+      </div>
+      <div className="min-w-0">
+        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[24px] font-semibold leading-tight tabular-nums text-app-text">
           {props.value}
         </div>
-        <div className="mt-0.5 text-[11px] text-app-muted">{props.sub}</div>
+        <div className="mt-1 text-[11px] text-app-subtle">{props.sub}</div>
       </div>
     </article>
   );

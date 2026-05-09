@@ -1,16 +1,11 @@
 import { useState } from "react";
 import { useFirewall } from "../lib/firewall";
-import { badge, control, cx } from "../lib/styles";
+import { badge, button, control, cx, sectionLabel } from "../lib/styles";
 import type { FirewallMode } from "../lib/types";
 
 const MODE_LABEL: Record<FirewallMode, string> = {
   denylist: "Deny list",
   allowlist: "Allow list",
-};
-
-const MODE_HELP: Record<FirewallMode, string> = {
-  denylist: "Listed PIDs / IPs are blocked. Everything else passes.",
-  allowlist: "Only listed PIDs / IPs pass. Everything else is blocked.",
 };
 
 export function FirewallPanel() {
@@ -48,11 +43,9 @@ export function FirewallPanel() {
   });
 
   return (
-    <div className="flex flex-col gap-[7px] rounded-lg border border-app-line bg-app-surface p-[9px]">
-      <div className="grid gap-0.5 px-0.5">
-        <div className="text-[10px] font-bold uppercase tracking-[0.8px] text-app-subtle">
-          Firewall (eBPF)
-        </div>
+    <div className="flex flex-col gap-3 border-t border-app-line pt-4">
+      <div className="grid gap-1">
+        <div className={sectionLabel}>Firewall</div>
       </div>
 
       <div className="grid grid-cols-2 gap-1">
@@ -62,21 +55,17 @@ export function FirewallPanel() {
             type="button"
             onClick={wrap(() => fw.setMode(m))}
             className={cx(
-              "min-h-[26px] rounded-md border border-app-border bg-app-raised text-[11px] text-app-muted transition hover:border-app-blue/40 hover:text-app-text",
+              "min-h-8 rounded-md border border-app-border bg-app-raised text-[11px] font-semibold text-app-muted transition hover:border-app-muted/50 hover:text-app-text",
               fw.state.mode === m &&
-                "border-app-blueStrong/70 bg-app-blueStrong/15 text-app-blue",
+                "border-app-blue/50 bg-app-blue/10 text-app-blue",
             )}
           >
             {MODE_LABEL[m]}
           </button>
         ))}
       </div>
-      <div className="px-0.5 text-[10px] leading-snug text-app-subtle">
-        {MODE_HELP[fw.state.mode]}
-      </div>
-
       <div className="grid gap-1">
-        <label className="text-[11px] text-app-muted">Block PID</label>
+        <label className="text-[11px] font-medium text-app-muted">PID</label>
         <div className="flex gap-1">
           <input
             className={control}
@@ -92,7 +81,7 @@ export function FirewallPanel() {
           <button
             type="button"
             onClick={submitPid}
-            className="min-h-7 rounded-md border border-app-border bg-app-raised px-2 text-[11px] text-app-muted transition hover:border-app-blue/40 hover:text-app-text"
+            className={cx(button, "px-2 text-[11px]")}
           >
             Add
           </button>
@@ -104,16 +93,18 @@ export function FirewallPanel() {
         {fw.state.pids.length > 0 && (
           <button
             type="button"
-            className="self-start text-[10px] text-app-subtle hover:text-app-muted"
+            className="self-start text-[10px] font-medium text-app-subtle hover:text-app-muted"
             onClick={wrap(() => fw.clearPids())}
           >
-            clear all
+            Clear all
           </button>
         )}
       </div>
 
       <div className="grid gap-1">
-        <label className="text-[11px] text-app-muted">Block remote IP (v4)</label>
+        <label className="text-[11px] font-medium text-app-muted">
+          Remote IPv4
+        </label>
         <div className="flex gap-1">
           <input
             className={control}
@@ -128,7 +119,7 @@ export function FirewallPanel() {
           <button
             type="button"
             onClick={submitIp}
-            className="min-h-7 rounded-md border border-app-border bg-app-raised px-2 text-[11px] text-app-muted transition hover:border-app-blue/40 hover:text-app-text"
+            className={cx(button, "px-2 text-[11px]")}
           >
             Add
           </button>
@@ -137,16 +128,16 @@ export function FirewallPanel() {
         {fw.state.ipv4.length > 0 && (
           <button
             type="button"
-            className="self-start text-[10px] text-app-subtle hover:text-app-muted"
+            className="self-start text-[10px] font-medium text-app-subtle hover:text-app-muted"
             onClick={wrap(() => fw.clearIps())}
           >
-            clear all
+            Clear all
           </button>
         )}
       </div>
 
       {error && (
-        <div className="rounded border border-app-danger/40 bg-app-danger/10 px-1.5 py-1 text-[10px] text-app-danger">
+        <div className="rounded-md border border-app-danger/35 bg-app-danger/10 px-2 py-1.5 text-[10px] text-app-danger">
           {error}
         </div>
       )}
@@ -163,7 +154,7 @@ function Chips({
 }) {
   if (items.length === 0) {
     return (
-      <div className="text-[10px] italic text-app-subtle">No entries.</div>
+      <div className="text-[10px] text-app-subtle">No entries</div>
     );
   }
   return (
@@ -175,9 +166,9 @@ function Chips({
           onClick={() => onRemove(item)}
           className={cx(
             badge,
-            "cursor-pointer hover:border-app-danger/50 hover:text-app-danger",
+            "cursor-pointer hover:border-app-danger/45 hover:text-app-danger",
           )}
-          title="click to remove"
+          title="Click to remove"
         >
           {item} ×
         </button>

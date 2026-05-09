@@ -38,7 +38,7 @@ export function TrafficChart({ history }: Props) {
       drawLine(
         ctx,
         history.received,
-        "#3fb950",
+        "#9ab5ff",
         maxValue,
         padLeft,
         padTop,
@@ -48,7 +48,7 @@ export function TrafficChart({ history }: Props) {
       drawLine(
         ctx,
         history.sent,
-        "#a78bfa",
+        "#8ac7a0",
         maxValue,
         padLeft,
         padTop,
@@ -104,9 +104,9 @@ function drawGrid(
   const graphHeight = height - padTop - padBottom;
   const graphWidth = width - padLeft - padRight;
 
-  ctx.strokeStyle = "#21262d";
+  ctx.strokeStyle = "#2a303b";
   ctx.lineWidth = 0.5;
-  ctx.fillStyle = "#484f58";
+  ctx.fillStyle = "#737d8f";
   ctx.font = "10px Segoe UI, sans-serif";
   ctx.textAlign = "right";
 
@@ -141,20 +141,22 @@ function drawLine(
   const y = (v: number) => padTop + graphHeight - (v / maxValue) * graphHeight;
 
   ctx.beginPath();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
   data.forEach((value, i) => {
     if (i === 0) ctx.moveTo(x(i), y(value));
     else ctx.lineTo(x(i), y(value));
   });
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1.8;
   ctx.stroke();
 
   ctx.lineTo(x(data.length - 1), y(0));
   ctx.lineTo(x(0), y(0));
   ctx.closePath();
   const gradient = ctx.createLinearGradient(0, padTop, 0, padTop + graphHeight);
-  gradient.addColorStop(0, `${color}40`);
-  gradient.addColorStop(1, `${color}05`);
+  gradient.addColorStop(0, `${color}26`);
+  gradient.addColorStop(1, `${color}03`);
   ctx.fillStyle = gradient;
   ctx.fill();
 }

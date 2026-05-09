@@ -35,26 +35,28 @@ export function App() {
           activeProcessCount={filteredProcesses.length}
           onChange={updateFilters}
         />
-        <section className="flex min-w-0 flex-1 flex-col gap-3 overflow-y-auto p-3.5">
+        <section className="flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
           <StatCards
             snapshot={snapshot}
             processes={filteredProcesses}
             connections={filteredConnections}
           />
 
-          <div className="grid grid-cols-[minmax(360px,0.95fr)_minmax(480px,1.25fr)] gap-3">
-            <section className={panel}>
+          <div className="grid min-h-[380px] grid-cols-[minmax(400px,0.92fr)_minmax(560px,1.18fr)] gap-4">
+            <section className={cx(panel, "flex min-h-0 flex-col")}>
               <div className={panelHeader}>
                 <div>
-                  <div className={panelTitle}>Real-Time Traffic Flow</div>
-                  <div className={panelSubtitle}>Bandwidth (KB/s)</div>
+                  <div className={panelTitle}>Traffic Flow</div>
+                  <div className={panelSubtitle}>Live bandwidth in KB/s</div>
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  <Legend color="bg-app-green" label="Inbound" />
-                  <Legend color="bg-app-violet" label="Outbound" />
+                  <Legend color="bg-app-blue" label="Received" />
+                  <Legend color="bg-app-green" label="Sent" />
                 </div>
               </div>
-              <TrafficChart history={trafficHistory} />
+              <div className="min-h-0 flex-1">
+                <TrafficChart history={trafficHistory} />
+              </div>
             </section>
 
             <ProcessTable
@@ -65,15 +67,11 @@ export function App() {
             />
           </div>
 
-          <div>
-            <ConnectionTable
-              connections={filteredConnections}
-              sortKey={filters.connectionSort}
-              onSortChange={(connectionSort) =>
-                updateFilters({ connectionSort })
-              }
-            />
-          </div>
+          <ConnectionTable
+            connections={filteredConnections}
+            sortKey={filters.connectionSort}
+            onSortChange={(connectionSort) => updateFilters({ connectionSort })}
+          />
         </section>
       </main>
     </div>
@@ -94,7 +92,7 @@ function Legend({
       <div
         className={cx(
           color,
-          square ? "h-2.5 w-2.5 rounded-sm" : "h-0.5 w-5 rounded-sm",
+          square ? "h-2.5 w-2.5 rounded-sm" : "h-0.5 w-4 rounded-sm",
         )}
       />
       {label}

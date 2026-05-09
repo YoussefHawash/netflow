@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { formatRate, formatUptime } from "../lib/format";
-import { control, cx } from "../lib/styles";
+import { control, cx, primaryButton, sectionLabel } from "../lib/styles";
 import type { Direction, FilterState, MonitorSnapshot } from "../lib/types";
 import { FirewallPanel } from "./FirewallPanel";
 import { SelectField } from "./SelectField";
@@ -34,15 +34,13 @@ export function Sidebar({
       : users;
 
   return (
-    <aside className="flex w-[214px] shrink-0 flex-col overflow-y-auto border-r border-app-line bg-app-surface">
+    <aside className="flex w-[260px] shrink-0 flex-col overflow-y-auto border-r border-app-line bg-app-shell">
       <section
-        className="flex flex-col gap-2.5 p-3"
+        className="flex flex-col gap-4 p-4"
         aria-label="Monitor controls"
       >
-        <div className="grid gap-0.5 px-0.5 pt-0.5">
-          <div className="text-[10px] font-bold uppercase tracking-[0.8px] text-app-subtle">
-            Options
-          </div>
+        <div className="grid gap-1">
+          <div className={sectionLabel}>Controls</div>
         </div>
 
         <ControlBlock>
@@ -109,13 +107,13 @@ export function Sidebar({
                   key={dir}
                   type="button"
                   className={cx(
-                    "min-h-[26px] rounded-md border border-app-border bg-app-raised text-[11px] text-app-muted transition hover:border-app-blue/40 hover:text-app-text",
+                    "min-h-8 rounded-md border border-app-border bg-app-raised text-[11px] font-semibold text-app-muted transition hover:border-app-muted/50 hover:text-app-text",
                     filters.direction === dir &&
-                      "border-app-blue/40 bg-app-blueStrong/15 text-app-blue",
+                      "border-app-blue/50 bg-app-blue/10 text-app-blue",
                   )}
                   onClick={() => onChange({ direction: dir })}
                 >
-                  {dir === "all" ? "All" : dir === "inbound" ? "↓ In" : "↑ Out"}
+                  {dir === "all" ? "All" : dir === "inbound" ? "RX" : "TX"}
                 </button>
               ))}
             </div>
@@ -152,9 +150,10 @@ export function Sidebar({
             <button
               type="button"
               className={cx(
-                "min-h-7 rounded-md border border-app-blueStrong bg-app-blueStrong text-[11px] font-semibold text-white transition hover:border-app-blue hover:bg-app-blue",
+                primaryButton,
+                "w-full",
                 filters.paused &&
-                  "border-app-orange bg-app-orange hover:border-app-orangeDark hover:bg-app-orangeDark",
+                  "border-app-orange/45 bg-app-orange/10 text-app-orange hover:border-app-orange/70 hover:bg-app-orange/15",
               )}
               onClick={togglePause}
             >
@@ -166,27 +165,25 @@ export function Sidebar({
         <FirewallPanel />
       </section>
 
-      <section className="mt-auto border-t border-app-line px-4 py-3">
-        <div className="text-[10px] font-bold uppercase tracking-[0.8px] text-app-subtle">
-          System Status
-        </div>
+      <section className="mt-auto border-t border-app-line px-4 py-4">
+        <div className={sectionLabel}>System</div>
         <StatRow
           label={
             <>
-              <span className="text-app-green">↓</span> Total RX Rate
+              <span className="text-app-blue">RX</span> Rate
             </>
           }
-          value={`↓ ${formatRate(snapshot?.receivedRate ?? 0)}`}
-          valueClass="text-app-green"
+          value={formatRate(snapshot?.receivedRate ?? 0)}
+          valueClass="text-app-blue"
         />
         <StatRow
           label={
             <>
-              <span className="text-app-blue">↑</span> Total TX Rate
+              <span className="text-app-green">TX</span> Rate
             </>
           }
-          value={`↑ ${formatRate(snapshot?.sentRate ?? 0)}`}
-          valueClass="text-app-blue"
+          value={formatRate(snapshot?.sentRate ?? 0)}
+          valueClass="text-app-green"
         />
         <StatRow label="Active Processes" value={String(activeProcessCount)} />
         <StatRow
@@ -200,7 +197,7 @@ export function Sidebar({
 
 function ControlBlock({ children }: { children: ReactNode }) {
   return (
-    <div className="flex flex-col gap-[7px] rounded-lg border border-app-line bg-app-surface p-[9px]">
+    <div className="flex flex-col gap-3 border-t border-app-line pt-4 first:border-t-0 first:pt-0">
       {children}
     </div>
   );
@@ -208,8 +205,8 @@ function ControlBlock({ children }: { children: ReactNode }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid grid-cols-1 gap-1">
-      <label className="text-[11px] text-app-muted">{label}</label>
+    <div className="grid grid-cols-1 gap-1.5">
+      <label className="text-[11px] font-medium text-app-muted">{label}</label>
       {children}
     </div>
   );
@@ -225,7 +222,7 @@ function StatRow({
   valueClass?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 py-[3px]">
+    <div className="flex items-center justify-between gap-2 py-1">
       <span className="flex items-center gap-1.5 text-[11px] text-app-muted">
         {label}
       </span>
