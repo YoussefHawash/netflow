@@ -1,48 +1,55 @@
 # netflow
 
+A Linux network monitor built as a Tauri desktop app, with a React/TypeScript UI and a Rust + eBPF backend.
+
+## Structure
+
+```
+.
+├── src/                  # React + TypeScript frontend (Vite)
+│   ├── components/       # UI components (tables, charts, sidebar, firewall panel)
+│   ├── lib/              # Frontend helpers (types, formatting, monitor hook, history)
+│   ├── main.tsx          # React entry point
+│   └── styles.css        # Tailwind styles
+│
+├── netflow/              # Tauri host app (Rust)
+│   ├── src/              # loader, reader, filter, archiver, geo, proc_fs, state
+│   ├── tauri.conf.json   # Tauri configuration
+│   └── build.rs          # Builds and embeds the eBPF program
+│
+├── netflow-ebpf/         # eBPF program (kernel-side packet capture)
+├── netflow-common/       # Shared types between user space and eBPF
+│
+├── Cargo.toml            # Rust workspace
+├── package.json          # Frontend + Tauri CLI
+├── vite.config.ts        # Vite config
+└── index.html            # Vite entry
+```
+
 ## Prerequisites
 
-1. stable rust toolchains: `rustup toolchain install stable`
-1. nightly rust toolchains: `rustup toolchain install nightly --component rust-src`
-1. (if cross-compiling) rustup target: `rustup target add ${ARCH}-unknown-linux-musl`
-1. (if cross-compiling) LLVM: (e.g.) `brew install llvm` (on macOS)
-1. (if cross-compiling) C toolchain: (e.g.) [`brew install filosottile/musl-cross/musl-cross`](https://github.com/FiloSottile/homebrew-musl-cross) (on macOS)
-1. bpf-linker: `cargo install bpf-linker` (`--no-default-features` on macOS)
+- Stable Rust: `rustup toolchain install stable`
+- Nightly Rust (for eBPF): `rustup toolchain install nightly --component rust-src`
+- bpf-linker: `cargo install bpf-linker`
+- Node.js + npm
+- Linux with eBPF support (the app must run with appropriate capabilities, e.g. `sudo`)
 
-## Build & Run
+## Run
 
-Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
-
-```shell
-cargo run --release
-```
-
-Cargo build scripts are used to automatically build the eBPF correctly and include it in the
-program.
-
-## Cross-compiling on macOS
-
-Cross compilation should work on both Intel and Apple Silicon Macs.
+Install frontend dependencies once:
 
 ```shell
-CC=${ARCH}-linux-musl-gcc cargo build --package netflow --release \
-  --target=${ARCH}-unknown-linux-musl \
-  --config=target.${ARCH}-unknown-linux-musl.linker=\"${ARCH}-linux-musl-gcc\"
+npm install
 ```
-The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/netflow` can be
-copied to a Linux server or VM and run there.
 
+Start the app in development mode:
 
-### eBPF
+```shell
+npm run tauri dev
+```
 
-All eBPF code is distributed under either the terms of the
-[GNU General Public License, Version 2] or the [MIT license], at your
-option.
+Build a release bundle:
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in this project by you, as defined in the GPL-2 license, shall be
-dual licensed as above, without any additional terms or conditions.
-
-[Apache license]: LICENSE-APACHE
-[MIT license]: LICENSE-MIT
-[GNU General Public License, Version 2]: LICENSE-GPL2
+```shell
+npm run tauri build
+```
