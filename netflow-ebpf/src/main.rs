@@ -7,7 +7,7 @@ use aya_ebpf::{
     bindings::{xdp_action, TC_ACT_OK, TC_ACT_SHOT},
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel},
     macros::{classifier, kprobe, map, xdp},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, LruHashMap, RingBuf},
     programs::{ProbeContext, TcContext, XdpContext},
 };
 
@@ -24,6 +24,19 @@ static FILTER_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
 #[map]
 static FILTER_IPS_V4: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static BLOCKED_FLOWS_V4: LruHashMap<FlowKeyV4, u8> = LruHashMap::with_max_entries(8192, 0);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FlowKeyV4 {
+    remote_addr: u32,
+    local_port: u16,
+    remote_port: u16,
+    l4: u8,
+    _pad: [u8; 3],
+}
 
 const ETH_HDR_LEN: usize = 14;
 const ETH_P_IPV4: u16 = 0x0800;
@@ -178,6 +191,21 @@ fn should_block(matched: bool) -> bool {
     }
 }
 
+#[inline(always)]
+fn flow_blocked_v4(key: &FlowKeyV4) -> bool {
+    unsafe { BLOCKED_FLOWS_V4.get(key).is_some() }
+}
+
+#[inline(always)]
+fn block_flow_v4(key: &FlowKeyV4) {
+    let _ = BLOCKED_FLOWS_V4.insert(key, &0u8, 0);
+}
+
+#[inline(always)]
+fn unblock_flow_v4(key: &FlowKeyV4) {
+    let _ = BLOCKED_FLOWS_V4.remove(key);
+}
+
 #[classifier]
 pub fn netflow_egress(ctx: TcContext) -> i32 {
     match try_tc_egress(&ctx) {
@@ -190,7 +218,7 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
     let eth = tc_ptr_at::<EthHdr>(ctx, 0).ok_or(())?;
     let proto = u16::from_be(unsafe { (*eth).h_proto });
 
-    if proto != ETH_P_IP {
+    if proto != ETH_P_IPV4 {
         return Ok(TC_ACT_OK);
     }
 
@@ -198,6 +226,36 @@ fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
     let daddr = unsafe { (*ip).daddr };
 
     if should_block(ipv4_listed(daddr)) {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    let ihl = unsafe { (*ip).ihl_version } & 0x0f;
+    if ihl < 5 {
+        return Ok(TC_ACT_OK);
+    }
+    let l4_off = ETH_HDR_LEN + (ihl as usize) * 4;
+    let l4_proto = unsafe { (*ip).protocol };
+
+    let (sport_be, dport_be, l4) = match l4_proto {
+        IPPROTO_TCP => {
+            let th = tc_ptr_at::<TcpHdr>(ctx, l4_off).ok_or(())?;
+            (unsafe { (*th).source }, unsafe { (*th).dest }, L4_TCP)
+        }
+        IPPROTO_UDP => {
+            let uh = tc_ptr_at::<UdpHdr>(ctx, l4_off).ok_or(())?;
+            (unsafe { (*uh).source }, unsafe { (*uh).dest }, L4_UDP)
+        }
+        _ => return Ok(TC_ACT_OK),
+    };
+
+    let key = FlowKeyV4 {
+        remote_addr: u32::from_be(daddr),
+        local_port: u16::from_be(sport_be),
+        remote_port: u16::from_be(dport_be),
+        l4,
+        _pad: [0; 3],
+    };
+    if flow_blocked_v4(&key) {
         return Ok(TC_ACT_SHOT);
     }
 
@@ -213,7 +271,7 @@ pub fn netflow(ctx: XdpContext) -> u32 {
 }
 
 fn try_ingress(ctx: &XdpContext) -> Result<u32, ()> {
-    let eth = ptr_at::<EthHdr>(ctx, 0).ok_or(())?;
+    let eth = xdp_ptr_at::<EthHdr>(ctx, 0).ok_or(())?;
     let proto = u16::from_be(unsafe { (*eth).h_proto });
     let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
 
@@ -239,7 +297,7 @@ enum Verdict {
 }
 
 fn parse_v4(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<Verdict, ()> {
-    let ip = ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
+    let ip = xdp_ptr_at::<Ipv4Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
     let saddr = unsafe { (*ip).saddr };
 
     if should_block(ipv4_listed(saddr)) {
@@ -265,11 +323,24 @@ fn parse_v4(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<Verdict, ()> {
     ev.remote[3] = bytes[3];
 
     parse_l4(ctx, ETH_HDR_LEN + ip_hdr_len, proto, ev, true)?;
+
+    if ev.l4_proto == L4_TCP || ev.l4_proto == L4_UDP {
+        let key = FlowKeyV4 {
+            remote_addr: u32::from_be(saddr),
+            local_port: ev.local_port,
+            remote_port: ev.remote_port,
+            l4: ev.l4_proto,
+            _pad: [0; 3],
+        };
+        if flow_blocked_v4(&key) {
+            return Ok(Verdict::Drop);
+        }
+    }
     Ok(Verdict::Pass)
 }
 
 fn parse_v6(ctx: &XdpContext, ev: &mut PacketEvent) -> Result<(), ()> {
-    let ip = ptr_at::<Ipv6Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
+    let ip = xdp_ptr_at::<Ipv6Hdr>(ctx, ETH_HDR_LEN).ok_or(())?;
     let payload_len = u16::from_be(unsafe { (*ip).payload_len }) as u32;
     let next = unsafe { (*ip).next_hdr };
 
@@ -294,7 +365,7 @@ fn parse_l4(
 ) -> Result<(), ()> {
     match proto {
         IPPROTO_TCP => {
-            let th = ptr_at::<TcpHdr>(ctx, off).ok_or(())?;
+            let th = xdp_ptr_at::<TcpHdr>(ctx, off).ok_or(())?;
             let src = u16::from_be(unsafe { (*th).source });
             let dst = u16::from_be(unsafe { (*th).dest });
             ev.l4_proto = L4_TCP;
@@ -307,7 +378,7 @@ fn parse_l4(
             }
         }
         IPPROTO_UDP => {
-            let uh = ptr_at::<UdpHdr>(ctx, off).ok_or(())?;
+            let uh = xdp_ptr_at::<UdpHdr>(ctx, off).ok_or(())?;
             let src = u16::from_be(unsafe { (*uh).source });
             let dst = u16::from_be(unsafe { (*uh).dest });
             ev.l4_proto = L4_UDP;
@@ -379,14 +450,27 @@ fn try_egress(ctx: ProbeContext, l4: u8) -> Result<(), i64> {
         if !matched {
             matched = ipv4_listed(daddr_be);
         }
+
+        let key = FlowKeyV4 {
+            remote_addr: u32::from_be(daddr_be),
+            local_port,
+            remote_port: u16::from_be(dport_be),
+            l4,
+            _pad: [0; 3],
+        };
+        if should_block(matched) {
+            block_flow_v4(&key);
+            return Ok(());
+        } else {
+            unblock_flow_v4(&key);
+        }
     } else if family == AF_INET6 {
         event.net_proto = NP_IPV6;
         event.is_ipv6 = 1;
+        if should_block(matched) {
+            return Ok(());
+        }
     } else {
-        return Ok(());
-    }
-
-    if should_block(matched) {
         return Ok(());
     }
 

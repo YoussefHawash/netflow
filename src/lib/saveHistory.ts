@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useState } from "react";
 import type { ExportPeriod } from "./types";
 
@@ -20,17 +19,10 @@ export function useSaveHistory(): SaveHistoryApi {
 
   const run = useCallback(async () => {
     setError(null);
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const path = await save({
-      defaultPath: `netflow-${period}-${stamp}.xml`,
-      filters: [{ name: "XML", extensions: ["xml"] }],
-    });
-    if (!path) return;
-
     setSaving(true);
     try {
-      await invoke("export_history", { path, period });
-      setLastPath(path);
+      const written = await invoke<string>("export_history", { period });
+      setLastPath(written);
     } catch (e) {
       setError(String(e));
     } finally {

@@ -7,6 +7,10 @@ members = [
 ]
 default-members = ["netflow", "netflow-common"]
 
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
 
 [workspace.dependencies]
 aya = { git = "https://github.com/aya-rs/aya", default-features = false }

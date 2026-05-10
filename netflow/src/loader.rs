@@ -70,8 +70,12 @@ pub fn load(interface: &str) -> Result<LoadedPrograms> {
         ebpf.take_map("FILTER_IPS_V4")
             .context("FILTER_IPS_V4 map not found")?,
     )?;
+    let flows = HashMap::<MapData, [u8; 12], u8>::try_from(
+        ebpf.take_map("BLOCKED_FLOWS_V4")
+            .context("BLOCKED_FLOWS_V4 map not found")?,
+    )?;
 
-    let filter = FilterMaps::new(mode, pids, ipv4);
+    let filter = FilterMaps::new(mode, pids, ipv4, flows);
 
     Ok(LoadedPrograms {
         ebpf,
@@ -101,6 +105,7 @@ pub fn attach_tc_egress(
 fn ensure_clsact(interface: &str) -> Result<()> {
     match tc::qdisc_add_clsact(interface) {
         Ok(()) | Err(TcError::AlreadyAttached) => Ok(()),
+        Err(TcError::NetlinkError(err)) if err.raw_os_error() == Some(libc::EEXIST) => Ok(()),
         Err(error) => Err(error).with_context(|| format!("adding clsact qdisc to {interface}")),
     }
 }

@@ -21,11 +21,15 @@ export function TitleBar({ paused }: Props) {
           onChange={(event) =>
             saver.setPeriod(event.target.value as ExportPeriod)
           }
-          className="min-h-8 rounded-md border border-app-border bg-app-raised px-2.5 text-xs font-medium text-app-muted outline-none transition hover:border-app-muted/50 hover:text-app-text focus-visible:border-app-blue focus-visible:ring-2 focus-visible:ring-app-blue/15"
+          className="min-h-8 rounded-md border border-app-border bg-app-raised px-2.5 text-xs font-medium text-app-text outline-none transition focus-visible:border-app-blue focus-visible:ring-2 focus-visible:ring-app-blue/15"
           title="XML export range"
         >
-          <option value="hour">Last hour</option>
-          <option value="day">Today</option>
+          <option value="hour" className="bg-app-raised text-app-text">
+            Last hour
+          </option>
+          <option value="day" className="bg-app-raised text-app-text">
+            Today
+          </option>
         </select>
         <button
           type="button"

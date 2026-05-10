@@ -77,13 +77,35 @@ fn clear_ip_filter(monitor: tauri::State<'_, Monitor>) {
 
 #[tauri::command]
 fn export_history(
-    path: String,
+    path: Option<String>,
     period: Option<ExportPeriod>,
     monitor: tauri::State<'_, Monitor>,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let period = period.unwrap_or(ExportPeriod::Hour);
+    let target = match path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => default_export_path(period),
+    };
     monitor
-        .export_history(Path::new(&path), period.unwrap_or(ExportPeriod::Hour))
-        .map_err(|e| e.to_string())
+        .export_history(&target, period)
+        .map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+fn default_export_path(period: ExportPeriod) -> PathBuf {
+    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
+    let name = format!("netflow-{}-{stamp}.xml", match period {
+        ExportPeriod::Hour => "hour",
+        ExportPeriod::Day => "day",
+    });
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let base = home
+        .as_ref()
+        .map(|h| h.join("Downloads"))
+        .filter(|p| p.is_dir())
+        .or(home)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(name)
 }
 
 

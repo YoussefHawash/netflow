@@ -43,6 +43,7 @@ pub struct FilterMaps {
     mode: Array<MapData, u32>,
     pids: HashMap<MapData, u32, u8>,
     ipv4: HashMap<MapData, u32, u8>,
+    flows: HashMap<MapData, [u8; 12], u8>,
 }
 
 impl FilterMaps {
@@ -50,14 +51,28 @@ impl FilterMaps {
         mode: Array<MapData, u32>,
         pids: HashMap<MapData, u32, u8>,
         ipv4: HashMap<MapData, u32, u8>,
+        flows: HashMap<MapData, [u8; 12], u8>,
     ) -> Self {
-        Self { mode, pids, ipv4 }
+        Self {
+            mode,
+            pids,
+            ipv4,
+            flows,
+        }
+    }
+
+    fn clear_flows(&mut self) {
+        let keys: Vec<[u8; 12]> = self.flows.keys().filter_map(|r| r.ok()).collect();
+        for k in keys {
+            let _ = self.flows.remove(&k);
+        }
     }
 
     pub fn set_mode(&mut self, mode: FilterMode) -> Result<()> {
         self.mode
             .set(0, mode.raw(), 0)
             .context("FILTER_MODE write")?;
+        self.clear_flows();
         Ok(())
     }
 
@@ -72,11 +87,13 @@ impl FilterMaps {
         self.pids
             .insert(pid, 0u8, 0)
             .context("FILTER_PIDS insert")?;
+        self.clear_flows();
         Ok(())
     }
 
     pub fn remove_pid(&mut self, pid: u32) {
         let _ = self.pids.remove(&pid);
+        self.clear_flows();
     }
 
     pub fn list_pids(&self) -> Vec<u32> {
@@ -89,17 +106,20 @@ impl FilterMaps {
         for p in self.list_pids() {
             let _ = self.pids.remove(&p);
         }
+        self.clear_flows();
     }
 
     pub fn add_ipv4(&mut self, addr: Ipv4Addr) -> Result<()> {
         self.ipv4
             .insert(Self::key(addr), 0u8, 0)
             .context("FILTER_IPS_V4 insert")?;
+        self.clear_flows();
         Ok(())
     }
 
     pub fn remove_ipv4(&mut self, addr: Ipv4Addr) {
         let _ = self.ipv4.remove(&Self::key(addr));
+        self.clear_flows();
     }
 
     pub fn list_ipv4(&self) -> Vec<Ipv4Addr> {
@@ -117,6 +137,7 @@ impl FilterMaps {
         for ip in self.list_ipv4() {
             let _ = self.ipv4.remove(&Self::key(ip));
         }
+        self.clear_flows();
     }
 
     pub fn snapshot(&self) -> FilterState {
