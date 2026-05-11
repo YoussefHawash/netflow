@@ -14,7 +14,7 @@ That's it. Frontend, backend, and the eBPF program are all bundled inside. `sudo
 
 ## Or build it yourself
 
-If you'd rather compile from source and go do shit:
+If you'd rather compile from source, then here's your guide:
 
 ### Prerequisites
 
